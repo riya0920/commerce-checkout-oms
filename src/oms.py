@@ -43,7 +43,7 @@ TRANSITIONS: dict[str, set[str]] = {
     "packed": {"partially_shipped", "shipped"},
     "partially_shipped": {"partially_shipped", "shipped"},
     "shipped": {"delivered"},
-    "delivered": {"return_requested"},
+    "delivered": {"return_requested", "partially_returned", "returned"},
     "return_requested": {"partially_returned", "returned"},
     "partially_returned": {"partially_returned", "returned", "return_requested"},
     "returned": set(),

@@ -2,8 +2,8 @@
 1. FLASH SALE -- 1000 CONCURRENT CHECKOUTS, 50 UNITS
 ==============================================================================
 mechanism    attempted   placed   sold_out oversell    errors     tput/s   p95 ms   p99 ms
-optimistic        1000       50        950        0         0      669.3     8.12   898.58
-pessimistic       1000       50        950        0         0      529.2    10.64   995.20
+optimistic        1000       50        950        0         0      365.9    96.53   885.12
+pessimistic       1000       50        950        0         0      419.9    48.84   780.15
 
 optimistic   stock on_hand=0 reserved=0 committed_reservations=50
              invariant violations: none
@@ -139,3 +139,136 @@ Audit trail (the CS-agent view):
   MONEY refund       3915  return
 
 ledger invariant violations: none
+
+==============================================================================
+6. ALLOCATION -- WHICH WAREHOUSE SHIPS WHICH LINE
+==============================================================================
+The first pass took `warehouse` as a STRING ARGUMENT to ship(). The
+split across DCs in drill 5 was a test fixture describing a split, not
+a system computing one. This computes it.
+
+Stock position (units free):
+  DC          TEE    MUG    PAN    dist km
+  DC_NJ        10      0     10         14
+  DC_OH        10     10      0        765
+  DC_NV        50     50     50       3585
+
+Order: TEE x2, MUG x1, PAN x1, shipping to New York.
+No single DC can fill it: NJ has no MUG, OH has no PAN.
+
+Allocator chose 2 parcel(s), cost $46.26:
+  DC_NJ    -> TEE x2, PAN x1
+  DC_OH    -> MUG x1
+
+The rule everyone writes first -- 'nearest DC that has everything,
+else split' -- finds that only DC_NV can fill the whole order, and
+ships one parcel from Nevada at $150.58.
+The allocator ships TWO parcels from the east coast for $46.26 --
+$104.32 cheaper, or 31% of the naive cost.
+
+The extra parcel costs $6.50 in pick-pack-label; the 3,585 km it avoids
+costs far more. That is the trade the naive rule cannot see, because
+'minimise splits' and 'minimise distance' are different objectives
+and it only has the first one.
+
+The answer is a function of the cost constants, not of the code:
+PARCEL_COST_CENTS = $6.50 and COST_PER_KM_CENTS = 4 are MERCHANT
+INPUTS, not physics. Raise the parcel cost far enough and the single
+far parcel wins. They are named constants at the top of
+src/allocation.py precisely so a merchant can argue with them rather
+than discovering them buried in a comparison.
+
+WHAT THIS IS NOT: a network optimisation. It scores one order at a
+time with no view of the orders behind it, no inventory-position
+forecast, and no capacity reservation. Draining the near DC to save
+a parcel today is a cost you pay tomorrow, and nothing here models
+tomorrow.
+
+==============================================================================
+7. EXCHANGES AS LINKED ORDERS
+==============================================================================
+The tempting implementation is refund-then-reorder. It fails three
+ways a customer notices: the replacement is not reserved so their
+size sells out mid-flight; they see a debit before the credit clears
+and call support about being double-charged; and the price may have
+moved so an even swap becomes an argument.
+
+Customer bought TEE-M for $30.00 (captured $32.63 incl. tax).
+
+  EVEN swap for TEE-L    returned $32.63, replacement $32.63 ($30.00 + $2.63 tax), NET $0.00
+                         money movements for the swap: 0 (none -- even swap, no money moves)
+                         child order ord_05ee26f7, stock held before the return processed
+                         ledger violations: none
+  UP-swap for TEE-XL     returned $32.63, replacement $39.15 ($36.00 + $3.15 tax), NET $6.52
+                         money movements for the swap: 1 (capture $6.52)
+                         child order ord_fe7726e8, stock held before the return processed
+                         ledger violations: none
+
+An EVEN exchange moves NO money at all. Refund-then-reorder would
+have produced two movements -- a refund and a capture -- for a
+transaction whose net value is zero, and the customer would have
+watched their money leave and come back.
+
+The replacement is RESERVED BEFORE the return is processed. If the
+size is gone the exchange fails cleanly and the customer still has
+their original item -- rather than being refunded into a stockout.
+  replacement out of stock -> ok=False reason=replacement_out_of_stock
+  parent order still delivered, refunds issued: 0
+
+==============================================================================
+8. REPRICING BETWEEN CART AND CHECKOUT
+==============================================================================
+Prices move while a cart sits open. The question is not whether they
+change, it is who absorbs it and up to what threshold. Charging the
+new higher price silently is the failure that produces chargebacks;
+honouring a stale price forever turns a pricing error into a
+promotion. Policy: absorb rises up to the SMALLER of $3.00 or 5.0%,
+always pass decreases on, re-prompt above the threshold.
+
+scenario                         quoted    current       decision    charged
+unchanged                        $50.00     $50.00      unchanged     $50.00
+fell to $45                      $50.00     $45.00        reduced     $45.00
+rose $2 (within tol.)            $50.00     $52.00       honoured     $50.00
+rose $12 (over tol.)             $50.00     $62.00      reconfirm          -
+
+`reconfirm` is a REAL outcome, not an error path. The alternative --
+charging more than the customer agreed to -- costs a chargeback, and
+a chargeback costs more than the abandoned cart does. Every decision
+is written to order_events, so a CS agent asked 'why did this cost
+more than the email said' has an answer.
+
+==============================================================================
+9. OPS METRICS -- WHAT THE EVENT LOG WAS ALWAYS FOR
+==============================================================================
+order_events existed from the first commit and nothing read it except
+the CS-agent audit view. This is the other consumer, and it is the
+reason to write transitions to a LOG rather than only mutating a
+state column: the funnel is a QUERY over history, not a set of
+counters someone remembered to increment.
+
+300 checkouts against a PSP declining 8% and timing out 10%,
+against 220 units of stock:
+
+step           orders     % of started    step conversion
+started           300           100.0%             100.0%
+reserved          144            48.0%              48.0%
+placed            116            38.7%              80.6%
+shipped            99            33.0%              85.3%
+delivered          91            30.3%              91.9%
+
+On-call health:
+  reservation_expiry_rate    0.056
+  payment_failure_rate       0.027
+  out_of_stock_rate          0.520
+  capture_unknown_open       20
+  reservations_held_now      20
+
+capture_unknown_open is the one to page on. It is not a rate, it is
+a COUNT of orders where money may have moved and nobody knows --
+every one of them is a customer who may have been charged for an
+order that does not exist. It should be driven to zero by the
+reconciliation job in section 2, and if it is not, the job is broken.
+
+The out_of_stock_rate is high here BY CONSTRUCTION -- 300 checkouts
+against 220 units -- and that is worth saying rather than presenting
+it as a finding. It is a fixture, not a measurement of anything.

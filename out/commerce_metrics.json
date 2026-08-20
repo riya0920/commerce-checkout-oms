@@ -11,11 +11,11 @@
       "stock_on_hand": 0,
       "stock_reserved": 0,
       "reservations_committed": 50,
-      "wall_seconds": 1.494,
-      "throughput_per_sec": 669.3,
-      "p50_ms": 0.269,
-      "p95_ms": 8.123,
-      "p99_ms": 898.575,
+      "wall_seconds": 2.733,
+      "throughput_per_sec": 365.9,
+      "p50_ms": 0.594,
+      "p95_ms": 96.529,
+      "p99_ms": 885.122,
       "invariant_problems": []
     },
     {
@@ -29,11 +29,11 @@
       "stock_on_hand": 0,
       "stock_reserved": 0,
       "reservations_committed": 50,
-      "wall_seconds": 1.89,
-      "throughput_per_sec": 529.2,
-      "p50_ms": 0.3,
-      "p95_ms": 10.638,
-      "p99_ms": 995.199,
+      "wall_seconds": 2.382,
+      "throughput_per_sec": 419.9,
+      "p50_ms": 0.617,
+      "p95_ms": 48.845,
+      "p99_ms": 780.148,
       "invariant_problems": []
     }
   ],
@@ -78,5 +78,60 @@
     "refunded": 7830,
     "residual": 0,
     "invariant_problems": []
+  },
+  "allocation": {
+    "parcels": 2,
+    "cost": 4626,
+    "naive_single_parcel_cost": 15058
+  },
+  "exchange": {
+    "even_swap_movements": 0,
+    "oos_handled": true
+  },
+  "repricing": {
+    "policy_cents": 300,
+    "policy_bp": 500
+  },
+  "ops": {
+    "funnel": [
+      {
+        "step": "started",
+        "orders": 300,
+        "pct_of_started": 100.0,
+        "step_conversion": 100.0
+      },
+      {
+        "step": "reserved",
+        "orders": 144,
+        "pct_of_started": 48.0,
+        "step_conversion": 48.0
+      },
+      {
+        "step": "placed",
+        "orders": 116,
+        "pct_of_started": 38.666666666666664,
+        "step_conversion": 80.55555555555556
+      },
+      {
+        "step": "shipped",
+        "orders": 99,
+        "pct_of_started": 33.0,
+        "step_conversion": 85.34482758620689
+      },
+      {
+        "step": "delivered",
+        "orders": 91,
+        "pct_of_started": 30.333333333333332,
+        "step_conversion": 91.91919191919192
+      }
+    ],
+    "health": {
+      "orders": 300,
+      "reservation_expiry_rate": 0.05555555555555555,
+      "capture_unknown_open": 20,
+      "payment_failure_rate": 0.02666666666666667,
+      "out_of_stock_rate": 0.52,
+      "reservations_held_now": 20
+    }
   }
 }

