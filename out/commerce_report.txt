@@ -1,0 +1,141 @@
+==============================================================================
+1. FLASH SALE -- 1000 CONCURRENT CHECKOUTS, 50 UNITS
+==============================================================================
+mechanism    attempted   placed   sold_out oversell    errors     tput/s   p95 ms   p99 ms
+optimistic        1000       50        950        0         0      669.3     8.12   898.58
+pessimistic       1000       50        950        0         0      529.2    10.64   995.20
+
+optimistic   stock on_hand=0 reserved=0 committed_reservations=50
+             invariant violations: none
+pessimistic  stock on_hand=0 reserved=0 committed_reservations=50
+             invariant violations: none
+
+Exactly 50 succeed and the rest get a clean sold-out. No oversell is
+possible because the check and the decrement are ONE statement: the
+optimistic UPDATE carries `AND version = ? AND on_hand - reserved >= ?`
+in its WHERE clause, so a loser changes nothing and sees rowcount 0.
+
+READ THE THROUGHPUT COLUMN WITH THE SUBSTITUTION IN MIND. SQLite
+serialises writers at the database level, so this is NOT a measurement
+of optimistic vs pessimistic row-level concurrency -- both mechanisms
+are queueing behind the same global write lock. What the comparison
+does show is the cost of the optimistic RETRY path under contention:
+every loser re-reads and re-issues, and on a 50-unit sale with 1,000
+shoppers almost everyone is a loser. On Postgres with row locks the
+pessimistic column would be the one paying, and the honest version of
+this benchmark needs that engine. Claiming otherwise from this data
+would be the exact overreach the spec is screening for.
+
+==============================================================================
+2. PSP TIMED OUT AFTER CAPTURE -- THE UGLY ONE
+==============================================================================
+60 checkouts against a PSP timing out 35% of the time after capture:
+  placed             35
+  capture_unknown    25   <- money may have moved, nobody knows
+
+Reconciliation job asks the PSP what actually happened:
+  examined 25   confirmed 25   voided 0
+  orders left in capture_unknown: 0
+  capture movements before/after: 35 -> 60
+
+Re-running the job (it is on a schedule, so it WILL run again):
+  examined 0   confirmed 0   voided 0  <- no-op, as required
+  orders with more than one capture movement: 0
+
+PSP-side check -- did we charge anyone twice?
+  captures settled at the PSP: 60
+  capture movements in our ledger: 60
+
+The customer is charged once or not at all, and a paid order is never
+silently dropped. The mechanism is that the idempotency key we send
+the PSP is derived from our own attempt id, so the reconciliation job
+can SEARCH for it afterwards. A capture sent without a key you can
+look up later makes this ambiguity permanently unresolvable.
+  ledger invariant violations: none
+
+==============================================================================
+3. THE EXPIRY SWEEPER CRASHES MID-BATCH
+==============================================================================
+before sweep:  held=200  on_hand=500  reserved=200
+crashed the sweeper 5 times mid-batch, then ran it to completion.
+after:         held=0  released=200  on_hand=500  reserved=0
+  invariant violations: none
+
+WHAT IS GUARANTEED ON RESTART: every reservation is released exactly
+once. The guarantee comes from the state guard, not from bookkeeping --
+the UPDATE that frees the stock is predicated on the row still being
+'held' and lives in the same transaction that marks it 'released', so a
+crash leaves a released PREFIX and untouched remainder. There is no
+interleaving in which stock is returned twice or leaks permanently.
+
+==============================================================================
+4. DOUBLE-SUBMIT
+==============================================================================
+24 concurrent submits of one idempotency key:
+  distinct order ids returned to callers: 1
+  orders in the database:                 1
+  capture movements:                      1
+  stock consumed:                         1
+
+One order, one capture, one unit. The arbiter is a UNIQUE constraint on
+idempotency_key -- not a check-then-insert, which loses the very race it
+was written to prevent. The loser of the INSERT catches IntegrityError
+and reads back the winner's order, so every caller gets the same answer.
+
+==============================================================================
+5. PARTIAL RETURN OF A DISCOUNTED ORDER -- THE ARITHMETIC
+==============================================================================
+Order: 3 items, $90.00 gross, 20% off order = -$18.00
+  order-level discount allocated to lines: $6.00, $3.00, $9.00
+  tax (8.75%) = $6.30, grand total = $78.30
+
+Shipped in two parcels (DC1: lines 0,1 / DC2: line 2), delivered.
+
+Customer returns 1 of 3 items -- the PAN:
+  gross price                 $   45.00
+  less its share of the 20%    -$    9.00
+  plus its share of the tax   +$    3.15
+  ------------------------------------
+  REFUND                      $   39.15
+
+The customer never paid $45.00 for that pan -- they paid $36.00 plus
+tax, because the order discount was theirs proportionally. Refunding
+the ticket price would hand back $9.00 of discount that was never
+charged. WHO DEFINED THE POLICY: proportional allocation is set at
+checkout by the promotions engine (se2), not invented at return time --
+which is why se2's allocation invariant is exact to the cent.
+
+Ledger after the partial refund:
+  captured  $   78.30
+  refunded  $   39.15
+  net       $   39.15   refunds <= captured: True
+
+Then the customer returns the other two:
+  captured  $   78.30
+  refunded  $   78.30
+  residual  $    0.00  (this is shipping+rounding, not a leak)
+
+Returning every unit one return-event at a time refunds EXACTLY the
+captured amount. Per-unit discount and tax shares are apportioned by
+largest remainder, so no cent is created on the first return or
+stranded on the last -- which is the failure a naive per-unit division
+produces and which surfaces months later as an unexplainable penny.
+
+Audit trail (the CS-agent view):
+  -                      -> pending                checkout started
+  pending                -> reserved               {"reservations": 3}
+  reserved               -> placed                 captured 7830
+  placed                 -> allocated              
+  allocated              -> picked                 
+  picked                 -> packed                 
+  packed                 -> partially_shipped      warehouse=DC1 {0: 1, 1: 1}
+  partially_shipped      -> shipped                warehouse=DC2 {2: 1}
+  shipped                -> delivered              
+  delivered              -> return_requested       
+  return_requested       -> partially_returned     refund=3915
+  partially_returned     -> returned               refund=3915
+  MONEY capture      7830  checkout
+  MONEY refund       3915  return
+  MONEY refund       3915  return
+
+ledger invariant violations: none

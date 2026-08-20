@@ -1,0 +1,25 @@
+# Generated data -- every file here is reproducible by running the project's
+# own generator with its fixed seed. Committing it would add megabytes and
+# invite the reader to trust a file instead of the script that made it.
+data/
+*.parquet
+*.npy
+*.db
+*.db-wal
+*.db-shm
+*.csv.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

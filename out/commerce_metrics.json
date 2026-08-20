@@ -1,0 +1,82 @@
+{
+  "flash_sale": [
+    {
+      "mechanism": "optimistic",
+      "attempted": 1000,
+      "placed": 50,
+      "sold_out": 950,
+      "errors": 0,
+      "error_kinds": [],
+      "oversells": 0,
+      "stock_on_hand": 0,
+      "stock_reserved": 0,
+      "reservations_committed": 50,
+      "wall_seconds": 1.494,
+      "throughput_per_sec": 669.3,
+      "p50_ms": 0.269,
+      "p95_ms": 8.123,
+      "p99_ms": 898.575,
+      "invariant_problems": []
+    },
+    {
+      "mechanism": "pessimistic",
+      "attempted": 1000,
+      "placed": 50,
+      "sold_out": 950,
+      "errors": 0,
+      "error_kinds": [],
+      "oversells": 0,
+      "stock_on_hand": 0,
+      "stock_reserved": 0,
+      "reservations_committed": 50,
+      "wall_seconds": 1.89,
+      "throughput_per_sec": 529.2,
+      "p50_ms": 0.3,
+      "p95_ms": 10.638,
+      "p99_ms": 995.199,
+      "invariant_problems": []
+    }
+  ],
+  "capture_unknown": {
+    "checkouts": 60,
+    "went_unknown": 25,
+    "reconciled": {
+      "examined": 25,
+      "confirmed": 25,
+      "voided": 0
+    },
+    "rerun_was_noop": true,
+    "duplicate_captures": 0,
+    "psp_captures_settled": 60,
+    "our_capture_movements": 60
+  },
+  "sweeper": {
+    "crashes": 5,
+    "still_held": 0,
+    "released": 200,
+    "on_hand": 500,
+    "reserved": 0,
+    "invariant_problems": []
+  },
+  "idempotency": {
+    "concurrent_submits": 24,
+    "distinct_orders": 1,
+    "orders_in_db": 1,
+    "captures": 1,
+    "stock_consumed": 1
+  },
+  "partial_return": {
+    "gross": 9000,
+    "order_discount": 1800,
+    "allocation": [
+      600,
+      300,
+      900
+    ],
+    "pan_refund": 3915,
+    "captured": 7830,
+    "refunded": 7830,
+    "residual": 0,
+    "invariant_problems": []
+  }
+}
