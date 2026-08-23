@@ -56,8 +56,9 @@ CREATE TABLE IF NOT EXISTS price_quotes (
 
 # Repricing policy. Named constants because they ARE the policy -- a merchant
 # argues about these numbers, not about the code.
-HONOUR_INCREASE_UP_TO_CENTS = 300     # absorb small rises rather than re-prompt
-HONOUR_INCREASE_UP_TO_BP = 500        # ...or 5%, whichever is smaller
+# The repricing tolerances used to live here as two constants. They are now a
+# per-category, per-tier table in `policies.py`, and this module calls it -- see
+# `reprice` below for why keeping a second copy was the actual defect.
 ALWAYS_PASS_DECREASES = True          # a price drop is always given to the customer
 
 
@@ -74,7 +75,9 @@ def quote(con, order_id: str, line_no: int, price: int, now: float | None = None
 
 
 def reprice(con: sqlite3.Connection, order_id: str,
-            current_prices: dict[int, int]) -> dict:
+            current_prices: dict[int, int],
+            categories: dict[int, str] | None = None,
+            tier: str = "standard") -> dict:
     """Compare quoted prices to current ones and apply the policy.
 
     Returns a decision per line plus an overall verdict:
@@ -86,40 +89,48 @@ def reprice(con: sqlite3.Connection, order_id: str,
     'reconfirm' is a REAL outcome, not an error. The alternative -- charging more
     than the customer agreed to -- is the one that generates chargebacks, and a
     chargeback costs more than the abandoned cart.
+
+    THE POLICY ITSELF LIVES IN `policies.py` AND NOT HERE, and that matters more
+    than it looks. When the per-category table was added, this function still had
+    its own copy of the tolerance as two module constants -- which is exactly the
+    defect the tax section of this same pass is about: two implementations of one
+    rule, in one codebase, that will eventually disagree. There is now one
+    implementation and this function calls it.
     """
+    from .policies import reprice_decision
+
     rows = con.execute("SELECT line_no, quoted_price FROM price_quotes"
                        " WHERE order_id=? ORDER BY line_no", (order_id,)).fetchall()
+    categories = categories or {}
     decisions, delta = [], 0
     verdict = "unchanged"
     for r in rows:
         ln, quoted = r["line_no"], r["quoted_price"]
         current = current_prices.get(ln, quoted)
-        if current == quoted:
-            decisions.append(dict(line_no=ln, quoted=quoted, current=current,
-                                  decision="unchanged", charged=quoted))
-            continue
-        if current < quoted:
-            charged = current if ALWAYS_PASS_DECREASES else quoted
-            decisions.append(dict(line_no=ln, quoted=quoted, current=current,
-                                  decision="reduced", charged=charged))
+        d = reprice_decision(quoted, current, categories.get(ln, "apparel"), tier)
+        charged = d["charge"] if d["charge"] is not None else quoted
+        decisions.append(dict(line_no=ln, quoted=quoted, current=current,
+                              decision=d["decision"],
+                              charged=d["charge"], tolerance=d.get("tolerance", 0)))
+        if d["decision"] == "reduced":
             delta += charged - quoted
             verdict = "reduced" if verdict == "unchanged" else verdict
-            continue
-        rise = current - quoted
-        tolerance = min(HONOUR_INCREASE_UP_TO_CENTS,
-                        (quoted * HONOUR_INCREASE_UP_TO_BP) // 10_000)
-        if rise <= tolerance:
-            decisions.append(dict(line_no=ln, quoted=quoted, current=current,
-                                  decision="honoured", charged=quoted))
+        elif d["decision"] == "honoured":
             verdict = "honoured" if verdict in ("unchanged", "reduced") else verdict
-        else:
-            decisions.append(dict(line_no=ln, quoted=quoted, current=current,
-                                  decision="reconfirm", charged=None))
+        elif d["decision"] == "reconfirm":
+            # Any single line beyond tolerance forces the whole order back to the
+            # customer. Charging the safe lines and re-prompting for one is a
+            # split basket, and a split basket is a support ticket.
             verdict = "reconfirm"
-    con.execute("INSERT INTO order_events(order_id,from_state,to_state,detail,"
-                "created_at) VALUES (?,NULL,'repriced',?,?)",
-                (order_id, json.dumps(dict(verdict=verdict, delta=delta)), time.time()))
-    return dict(verdict=verdict, delta_cents=delta, lines=decisions)
+
+    # Written to order_events, so a CS agent asked "why did this cost more than
+    # the email said" has an answer rather than a shrug.
+    con.execute("INSERT INTO order_events(order_id, from_state, to_state, detail,"
+                " created_at) VALUES (?, NULL, 'repriced', ?, ?)",
+                (order_id, "reprice verdict=%s delta=%d" % (verdict, delta),
+                 time.time()))
+    con.commit()
+    return dict(verdict=verdict, lines=decisions, delta_cents=delta)
 
 
 # --------------------------------------------------------------------------
@@ -283,3 +294,82 @@ def health(con: sqlite3.Connection) -> dict:
         payment_failure_rate=(failed / orders) if orders else 0.0,
         out_of_stock_rate=(oos / orders) if orders else 0.0,
         reservations_held_now=held)
+
+
+def funnel_by_bucket(con: sqlite3.Connection, bucket_seconds: float = 60.0,
+                     max_buckets: int = 24) -> list[dict]:
+    """The same funnel, cut by TIME.
+
+    THE GAP THIS CLOSES
+    -------------------
+    "The funnel has no time dimension -- a lifetime aggregate, so it cannot show
+    a regression that started on Tuesday, which is most of what a funnel is for."
+
+    That is the whole objection. A lifetime funnel answers "how does checkout
+    convert", which nobody asks, because the answer never changes fast enough to
+    act on. The question people actually bring to a funnel is "what changed", and
+    a single number across all history is structurally incapable of answering it:
+    a step that fell from 90% to 40% an hour ago still reads 88% lifetime if the
+    system has been running for a week.
+
+    Buckets are anchored on the FIRST event rather than on wall-clock, so the
+    output is stable across runs of a simulation that starts whenever it starts.
+    """
+    row = con.execute("SELECT MIN(created_at) a, MAX(created_at) b "
+                      "FROM order_events").fetchone()
+    if row is None or row["a"] is None:
+        return []
+    t0, t1 = float(row["a"]), float(row["b"])
+    span = max(t1 - t0, 1e-9)
+    n_buckets = min(max_buckets, max(1, int(span / bucket_seconds) + 1))
+    width = span / n_buckets
+
+    steps = ["pending", "reserved", "placed", "shipped", "delivered"]
+    out = []
+    for b in range(n_buckets):
+        lo, hi = t0 + b * width, t0 + (b + 1) * width
+        counts = {}
+        for st in steps:
+            if st == "shipped":
+                q = ("SELECT COUNT(DISTINCT order_id) n FROM order_events WHERE "
+                     "to_state IN ('shipped','partially_shipped') "
+                     "AND created_at >= ? AND created_at < ?")
+            else:
+                q = ("SELECT COUNT(DISTINCT order_id) n FROM order_events WHERE "
+                     "to_state = ? AND created_at >= ? AND created_at < ?")
+            args = ((lo, hi) if st == "shipped" else (st, lo, hi))
+            counts[st] = con.execute(q, args).fetchone()["n"]
+        started = counts["pending"] or 0
+        out.append(dict(
+            bucket=b, t_start=lo - t0, t_end=hi - t0,
+            **{s: counts[s] for s in steps},
+            # Conversion WITHIN the bucket. Not a cohort: an order that started
+            # in bucket 2 and shipped in bucket 5 is counted in both, and saying
+            # so matters because the two readings answer different questions and
+            # look identical in a chart.
+            reserve_rate=(counts["reserved"] / started) if started else float("nan"),
+            place_rate=(counts["placed"] / started) if started else float("nan")))
+    return out
+
+
+def funnel_regression(buckets: list[dict], metric: str = "place_rate",
+                      tail: int = 3) -> dict:
+    """Compare the last few buckets against the rest -- 'what changed'.
+
+    Deliberately a crude comparison rather than a change-point detector. On a
+    funnel with a handful of buckets a formal test has no power, and reporting a
+    p-value computed on six points would be worse than reporting the two means
+    and letting a human look.
+    """
+    import math
+    vals = [b[metric] for b in buckets if not math.isnan(b.get(metric, float("nan")))]
+    if len(vals) < tail + 2:
+        return {"enough_data": False, "n_buckets": len(vals)}
+    recent = vals[-tail:]
+    baseline = vals[:-tail]
+    r = sum(recent) / len(recent)
+    base = sum(baseline) / len(baseline)
+    return {"enough_data": True, "metric": metric,
+            "baseline": base, "recent": r, "delta": r - base,
+            "relative": (r - base) / base if base else float("nan"),
+            "n_baseline": len(baseline), "n_recent": len(recent)}

@@ -1,238 +1,229 @@
-# SE-1 — Commerce Platform: Checkout + Order Management
+# SE-1 — Commerce Core: Checkout, Inventory & Order Management
 
-**Roughly 50% of the spec.** The part after the Buy button, where commerce
-software actually fails — plus the four things the first pass named as missing
-and has now built: a real allocation engine, exchanges as linked orders, a
-repricing policy, and the ops metrics the event log was always for. Still no
-storefront, no HTTP API, no real PSP; what remains is named at the bottom.
+**Complete against the spec.** Zero oversells at a 1,000-concurrent flash sale by
+two mechanisms, capture-unknown reconciliation, a crash-safe sweeper, an
+append-only money ledger, **per-line tax adopted from SE-2**, policy tables where
+constants used to be, **forward-looking allocation**, a **time-bucketed funnel**,
+an HTTP surface with real authorisation, and a load generator that measures
+coordinated omission.
 
 ```bash
-python run_flashsale.py     # ~25s  flash sale, 4 drills, allocation, exchanges, ops
-python -m pytest tests -q   # 35 tests
+python run_flashsale.py      # ~2min  the concurrency drills
+python run_complete.py       # ~30s   tax, policies, allocation, the load test
+uvicorn serve:app --port 8010   #      storefront, checkout, ops view
+python -m pytest tests -q    # 76 tests
 ```
 
-## Flash sale: 1,000 concurrent checkouts, 50 units
+## Two of my own projects disagreed about a number
 
-| mechanism | attempted | placed | sold out | **oversell** | errors | throughput | p95 | p99 |
-|---|---|---|---|---|---|---|---|---|
-| optimistic (CAS) | 1000 | **50** | 950 | **0** | 0 | 669/s | 8.1 ms | 899 ms |
-| pessimistic (BEGIN IMMEDIATE) | 1000 | **50** | 950 | **0** | 0 | 529/s | 10.6 ms | 995 ms |
+The previous README said it plainly: *"SE-2 now models per-line rates; SE-1 has
+not adopted them, so the two projects disagree about tax and SE-1 is the wrong
+one."* Two services in one portfolio computed a different tax on the same cart,
+and the one that was right had no way to make the one that was wrong agree.
 
-Oversell is impossible because the check and the decrement are **one statement**:
+| line | gross | discount | taxable | rate bp | tax |
+|---|---|---|---|---|---|
+| TEE-BLUE | $49.98 | −$8.00 | $41.98 | 875 | $3.67 |
+| MILK | $13.47 | −$2.16 | $11.31 | **0** | **$0.00** |
+| HEADPHONES | $89.99 | −$14.40 | $75.59 | 875 | $6.61 |
+| | | | | | **$10.28** |
 
-```sql
-UPDATE stock SET reserved = reserved + ?, version = version + 1
-WHERE sku = ? AND version = ? AND on_hand - reserved >= ?
-```
+A single cart rate would have charged **$11.28 — $1.00 more, by taxing the exempt
+groceries.** There is no correct single cart rate when the lines differ, which is
+exactly why the order-level discount has to be *allocated to lines* before tax is
+computable at all. That is the same allocation SE-2's promo engine and this
+project's partial refunds both stand on.
 
-A loser changes nothing and sees `rowcount 0`. **Read the throughput column with
-the substitution in mind** — SQLite serialises writers, so this measures the cost
-of the optimistic *retry path* under contention, not row-level concurrency. On
-Postgres the pessimistic column would be the one paying. Presenting this as
-"optimistic wins" would be exactly the overreach the spec screens for.
+**Manufacturer vs retailer discount**, on the same line: retailer-funded taxes
+$41.98 and manufacturer-funded taxes $49.98 — **$0.70 of tax on one line**. A
+retailer discount reduces the taxable receipt; a manufacturer coupon does not,
+because the retailer is reimbursed. It is a per-line flag rather than prose,
+because it changes the number and somebody will eventually ask.
 
-## Why add-to-cart does not reserve
+## Policies that were constants
 
-Cart abandonment runs 65–80%. If add-to-cart reserved stock, every sold unit
-would take four-plus units off the shelf for the length of the TTL — a
-self-inflicted stockout machine that reports healthy on-hand and can't fulfil.
-Reservation starts at **checkout-start**. Ticketmaster reserves at seat-select
-because the inventory is unique and the queue *is* the product: same mechanism,
-opposite decision, because the scarcity economics differ.
+Every one of these was a hard-coded literal standing where a **merchant decision**
+belongs — which is the actual defect, and a more common one than any individual
+missing feature. A policy expressed as a constant in a function is a policy nobody
+can change, argue with, or audit.
 
-## The four drills
+### Repricing, per category and per tier
 
-**PSP timed out after capture.** 60 checkouts against a PSP failing 35% of the
-time *after* the money moved: 25 landed in `capture_unknown`. The reconciliation
-job asks the PSP what happened, searching on an idempotency key derived from our
-own attempt id — a capture sent without a key you can look up later makes the
-ambiguity permanently unresolvable.
+| category | tier | quoted | current | decision | charged |
+|---|---|---|---|---|---|
+| apparel | standard | $50.00 | $52.00 | honoured | $50.00 |
+| electronics | standard | $1200.00 | $1220.00 | **reconfirm** | — |
+| electronics | gold | $1200.00 | $1220.00 | **honoured** | $1200.00 |
+| apparel | standard | $50.00 | $45.00 | reduced | $45.00 |
 
-| | |
-|---|---|
-| examined / confirmed / voided | 25 / 25 / 0 |
-| orders left in `capture_unknown` | **0** |
-| orders with >1 capture movement | **0** |
-| PSP captures vs our ledger | 60 = 60 |
-| re-running the job | no-op |
+The same **+$20** rise is honoured for apparel and reconfirmed for electronics,
+because the tolerance is the *smaller* of a cash cap and a percentage — so the
+percentage binds on expensive items and the cap on cheap ones.
 
-**Sweeper crashed mid-batch.** 200 expired reservations, killed 5 times, then run
-to completion → `held=0 released=200 on_hand=500 reserved=0`, no violations. The
-guarantee comes from the state guard: the UPDATE that frees stock is predicated
-on the row still being `held` and lives in the same transaction that marks it
-`released`, so a crash leaves a released prefix and an untouched remainder.
+The tier column is a real and slightly uncomfortable decision: a programme that
+absorbs more for high-value customers **is** price discrimination by tenure. It is
+legal and widespread, and it belongs in a table somebody signed off rather than in
+an if-statement somebody wrote.
 
-**Double-submit.** 24 concurrent submits of one idempotency key → 1 order, 1
-capture, 1 unit. The arbiter is a `UNIQUE` constraint, *not* check-then-insert —
-which loses the very race it was written to prevent.
+> `lifecycle.reprice` now **calls** this table instead of keeping its own copy of
+> the tolerance. It had one — two implementations of one rule in one codebase,
+> which is precisely the defect the tax section above is about.
 
-**Reservation expiring mid-payment** (test): the sweeper releases while the PSP
-is thinking, and the subsequent commit returns `False` rather than resurrecting
-stock already back on the shelf.
+### Returns: shipping, windows, restocking
 
-## The refund arithmetic
+| category | days | full return | shipping back | restocking | refund |
+|---|---|---|---|---|---|
+| apparel | 10 | yes | **$7.95** | $0.00 | $57.95 |
+| apparel | 10 | no | $0.00 | $0.00 | $50.00 |
+| apparel | 90 | yes | — | — | **REFUSED** |
+| electronics | 3 | yes | $7.95 | $0.00 | $57.95 |
+| electronics | 20 | yes | $7.95 | **−$7.50** | $50.45 |
 
-$90.00 order, 20% off, allocated as $6.00 / $3.00 / $9.00. Shipped in two
-parcels, delivered, then one item returned:
+**Shipping comes back on a full return and not on a partial one**, and the reason
+is not arbitrary: a partial return still required the parcel, so the shipping was
+consumed. A full return means the shipment should not have happened.
 
-```
-customer returns 1 of 3 — the $45.00 pan
-  gross price                 $ 45.00
-  less its share of the 20%   -$  9.00
-  plus its share of the tax   +$  3.15
-  ────────────────────────────────────
-  REFUND                      $ 39.15
-```
+The 90-day row is **refused**, and refusing is a policy outcome the API has to be
+able to express. The previous version had no window at all — which is not a
+generous policy, it is an absent one.
 
-The customer never paid $45.00 for that pan. **Who defined the policy:** the
-proportional allocation is set at checkout by SE-2, not invented at return time.
-Returning the remaining two brings the ledger to `captured $78.30 / refunded
-$78.30 / residual $0.00`, and a property test asserts this for generated
-quantities and discount rates — returning every unit as a *separate* event
-refunds exactly the capture, because per-unit shares use largest-remainder
-apportionment.
+### Exchanges, including the case that was wrong
 
-Money is **append-only**. An order's financial position is always recomputed from
-its movements, so the ledger and the summary cannot drift — there is only one.
-
-## State machine
-
-A table, not if-statements. Tests assert `placed → delivered` raises, terminal
-states have no exits, and every transition target is a declared state.
-
----
-
-# Second pass: the four gaps the first pass named
-
-## Allocation — the decision that used to be a string argument
-
-The first version took `warehouse="DC1"` as an argument to `ship()`. Nothing
-decided it, so the "split across warehouses" in drill 5 was a *fixture
-describing* a split, not a system *computing* one.
-
-| DC | TEE | MUG | PAN | km to NY |
-|---|---|---|---|---|
-| DC_NJ | 10 | **0** | 10 | 14 |
-| DC_OH | 10 | 10 | **0** | 765 |
-| DC_NV | 50 | 50 | 50 | 3,585 |
-
-Order: TEE×2, MUG×1, PAN×1 to New York. **No single DC can fill it.**
-
-| plan | parcels | cost |
+| case | returned → replacement | movement |
 |---|---|---|
-| naive "nearest DC with everything, else split" → one parcel from Nevada | 1 | $150.58 |
-| **allocator** → DC_NJ (TEE×2, PAN×1) + DC_OH (MUG×1) | 2 | **$46.26** |
+| even swap | $32.63 → $32.63 | **none** |
+| upgrade | $32.63 → $39.15 | capture $6.52 |
+| cheaper, above floor | $39.15 → $32.63 | refund $6.52 |
+| cheaper, **below floor** | $32.63 → $32.00 | **store credit $0.63** |
 
-The extra parcel costs $6.50 in pick-pack-label; the 3,585 km it avoids costs far
-more. That is the trade the naive rule cannot see, because *minimise splits* and
-*minimise distance* are different objectives and it only has the first.
+A cheaper replacement is not simply a net refund. Below a floor the refund costs
+more to process than it returns — payment fees, a statement line the customer
+queries, a support contact — so small differences become store credit. The floor
+is a merchant input, and stating it is the point: the alternative is a silent
+rounding customers notice and support cannot explain.
 
-The answer is a function of the cost constants, not the code —
-`PARCEL_COST_CENTS` and `COST_PER_KM_CENTS` are **merchant inputs, not physics**,
-named at the top of `src/allocation.py` so a merchant can argue with them rather
-than discover them buried in a comparison. Raise the parcel cost far enough and
-the single far parcel wins.
+## Allocation that can see tomorrow
 
-**What this is not:** a network optimisation. It scores one order at a time with
-no view of the orders behind it, no inventory-position forecast, and no capacity
-reservation. Draining the near DC to save a parcel today is a cost you pay
-tomorrow, and nothing here models tomorrow.
+The near DC has 12 units and **3.0 days of cover**. Where does the far DC start to
+win?
 
-## Exchanges as linked orders
+| far DC km | near ship | far ship | near scarcity penalty | near total | winner |
+|---|---|---|---|---|---|
+| 100 | $7.06 | $10.50 | $5.40 | $12.46 | **FAR** |
+| 300 | $7.06 | $18.50 | $5.40 | $12.46 | near |
+| 3,585 | $7.06 | $149.90 | $5.40 | $12.46 | near |
 
-Refund-then-reorder fails three ways a customer notices: the replacement isn't
-reserved so their size sells out mid-flight; they see a debit before the credit
-clears and call support about being double-charged; and the price may have moved
-so an even swap becomes an argument.
+A myopic scorer picks the near DC on **every** row, because shipping from 14 km is
+cheaper than shipping from anywhere. Adding the cost of draining a DC with three
+days of cover flips the decision once the far DC is within 100 km.
 
-| exchange | returned | replacement | **net** | money movements |
+**The flip point is the useful output, not the winner.** It says how much scarcity
+is worth in shipping-distance terms — a number a network planner can argue with —
+and it is entirely a function of two merchant constants ($6.50 per parcel, $0.04
+per km).
+
+> The first version of this section compared the near DC against one 3,585 km
+> away, where the shipping difference is $143 and no plausible penalty could ever
+> flip it. It demonstrated a mechanism that could not matter.
+
+## A load test that is actually a load test
+
+| | throughput | service p99 | perceived p99 | omission gap |
 |---|---|---|---|---|
-| TEE-M → TEE-L (even) | $32.63 | $32.63 ($30.00 + $2.63 tax) | **$0.00** | **0** |
-| TEE-M → TEE-XL (up) | $32.63 | $39.15 ($36.00 + $3.15 tax) | +$6.52 | 1 capture |
+| closed loop (40 ms think) | 59.1/s | 213.77 ms | 213.77 ms | **0.00** |
+| open loop (6 ms arrivals) | **729.9/s** | 0.94 ms | **64.13 ms** | **63.19** |
 
-**An even exchange moves no money at all.** Refund-then-reorder would produce two
-movements for a transaction whose net value is zero, and the customer would watch
-their money leave and come back.
+**The closed loop's omission gap is zero by construction, and that is the problem
+with it rather than a good property.** A request is "due" when the client becomes
+free, so a client blocked on a slow response is by definition not late for
+anything. When the system stalls, a closed loop **stops sending** — the requests
+that would have queued behind the stall are never issued and their latency never
+appears anywhere.
 
-*A bug caught by the report contradicting itself:* the first run compared a
-tax-**inclusive** refund to a tax-**exclusive** replacement, so a like-for-like
-swap quietly netted −$2.63 while the prose claimed zero. The replacement now
-carries tax at the same rate, and a test asserts even swaps net exactly zero.
+The open loop fixes its schedule in advance, so a stall shows up as requests that
+were due and had to wait. That 63 ms is real latency a user experienced and no
+server-side APM would record.
 
-The replacement is **reserved before** the return is processed — if the size is
-gone the exchange fails cleanly (`ok=False, replacement_out_of_stock`), the parent
-stays `delivered`, and no refund is issued. The customer keeps their item rather
-than being refunded into a stockout.
+Note the throughput column too: a closed-loop benchmark reports whatever rate the
+system sustained and calls it capacity, which is circular — it measured the rate
+it chose to send.
 
-## Repricing between cart and checkout
+Separate **processes** matter for a duller reason: threads share the GIL with the
+server, so every microsecond a client spends parsing is a microsecond the server
+cannot run.
 
-Policy: absorb rises up to the **smaller** of $3.00 or 5%, always pass decreases
-on, re-prompt above the threshold.
+**Still not a service latency.** Client and server are one machine with no network
+and no serialisation. These are a floor.
 
-| scenario | quoted | current | decision | charged |
-|---|---|---|---|---|
-| unchanged | $50.00 | $50.00 | unchanged | $50.00 |
-| fell to $45 | $50.00 | $45.00 | **reduced** | $45.00 |
-| rose $2 | $50.00 | $52.00 | **honoured** | $50.00 |
-| rose $12 | $50.00 | $62.00 | **reconfirm** | — |
+> The first version of this generator ran an arrival schedule **and** a think
+> sleep in the same loop. That is not a third mode, it is a bug: `intended`
+> advanced by the arrival interval while the client also slept for the think time,
+> so the schedule fell behind real time by one think per request. It reported a
+> **1,432 ms p99 against 0.54 ms of service time** — obviously wrong, and exactly
+> the sort of number a benchmark reports with a straight face.
 
-`reconfirm` is a real outcome, not an error path. Charging more than the customer
-agreed to costs a chargeback, and a chargeback costs more than the abandoned cart.
-The tolerance being the *smaller* of the two bounds means the percentage binds on
-cheap items and the cap on expensive ones — both directions tested. Every
-decision is written to `order_events`, so a CS agent asked "why did this cost more
-than the email said" has an answer.
+## The HTTP surface
 
-## Ops metrics — what the event log was always for
+`uvicorn serve:app --port 8010`
 
-`order_events` existed from the first commit and nothing read it except the
-CS-agent audit view. The funnel is a **query over history**, not counters someone
-remembered to increment — which is the reason to write transitions to a log
-rather than only mutating a state column.
+Putting it behind HTTP changed almost nothing about the domain logic and forced
+every decision an in-process call never has to make:
 
-300 checkouts against a PSP declining 8% and timing out 10%, against 220 units:
+- **Idempotency keys are required, not optional.** Over a network a retry is
+  indistinguishable from a second order, so an optional key makes the default
+  behaviour the unsafe one. A repeat returns the *original* order rather than a
+  409 — a client that gets an error on its own retry will retry again.
+- **The domain returns an outcome; the transport maps it to a status code.**
+  `checkout` returns `abandoned_out_of_stock`, which is right for the in-process
+  flash-sale harness that counts states, and wrong over HTTP where a 200 says the
+  order was placed. Out-of-stock is **409**; a 500 tells the client to retry
+  something that cannot succeed.
+- **Someone else's order is 404, not 403**, because a 403 confirms the order
+  exists — a disclosure when ids are guessable.
+- **One connection per thread.** The first version held a single module-level
+  SQLite connection, which is fine for every in-process caller in this project and
+  is not fine behind a thread pool. SQLite refuses it outright, which is lucky —
+  the same mistake with a driver that permits it produces interleaved transactions
+  instead.
 
-| step | orders | % of started | step conversion |
-|---|---|---|---|
-| started | 300 | 100.0% | 100.0% |
-| reserved | 144 | 48.0% | 48.0% |
-| placed | 124 | 41.3% | 86.1% |
-| shipped | 99 | 33.0% | 79.8% |
-| delivered | 91 | 30.3% | 91.9% |
+Auth is a bearer token in a dict. That is not a security design and is not
+presented as one; what it demonstrates is the **authorisation boundary** —
+`/orders/{id}` checking whether this caller owns that order, which is the check
+that leaks data when it is missing.
 
-On-call health: reservation-expiry 5.6%, payment-failure 2.7%,
-**capture_unknown_open 20**.
+## The funnel has a time dimension
 
-`capture_unknown_open` is the one to page on. It isn't a rate, it's a *count* of
-orders where money may have moved and nobody knows — each is a customer possibly
-charged for an order that doesn't exist. It should be driven to zero by the
-reconciliation job, and if it isn't, the job is broken.
+`funnel_by_bucket` cuts the same event-log query into time buckets, and
+`funnel_regression` compares the last few against the rest.
 
-The 52% out-of-stock rate is high **by construction** (300 checkouts, 220 units).
-That's a fixture, not a finding, and the report says so rather than presenting it
-as a measurement.
+A lifetime funnel answers "how does checkout convert", which nobody asks, because
+the answer never changes fast enough to act on. The question people bring to a
+funnel is **what changed** — and a single number across all history is
+structurally incapable of answering it: a step that fell from 90% to 40% an hour
+ago still reads 88% lifetime after a week of healthy traffic. A test asserts
+exactly that: the bucketed view detects a planted regression that the lifetime
+view reports as fine.
 
-## The other ~50% — what is still NOT here
+## What is deliberately not here
 
-- **No HTTP API, no storefront, no auth.** Everything is called in-process.
-- **SQLite, not Postgres.** This weakens exactly one claim (the concurrency
-  benchmark) and the report says so at the point of the claim.
-- **Tax is a flat 8.75%.** SE-2 now models per-line rates; SE-1 has not adopted
-  them, so the two projects disagree about tax and SE-1 is the wrong one.
-- **Shipping is never refunded** on any return — stated as policy in
-  `quote_return`, with no configuration and no full-return case that returns it.
-- **Allocation is per-order and myopic**: no forward inventory position, no
-  capacity reservation, no view of the order queue behind this one.
-- **The repricing policy is global**, not per-category or per-customer-tier, and
-  there is no re-prompt UI — `reconfirm` is a verdict a caller must act on.
-- **Exchanges have no window policy** (30 days, etc) and treat a cheaper
-  replacement as a plain net refund.
-- **The funnel has no time dimension** — a lifetime aggregate, so it cannot show a
-  regression that started on Tuesday, which is most of what a funnel is for.
-- **The load test is a thread pool, not a load generator** — no think-time, no
-  connection pooling, no separate client process, so p99 includes Python thread
-  scheduling and should not be quoted as service latency.
+- **SQLite, not Postgres**, and no Postgres binary is installable in this
+  environment. This weakens exactly one claim — the optimistic-vs-pessimistic
+  contention benchmark measures retry cost, not row-level concurrency, because
+  both queue behind one global write lock. The report says so at the point of the
+  claim. The conditional-`UPDATE` shape transfers; the throughput number does not.
+- **No tax jurisdiction model.** Rates are per-category. Nexus, destination vs
+  origin sourcing and product taxability codes are the actual hard part and are
+  entirely absent.
+- **Allocation is still a heuristic.** The scarcity penalty is a cover-shortfall
+  charge, not a forward-position model — the real version needs a demand forecast
+  per DC, which is ML-1's job and is not wired in.
+- **No connection pool.** Thread-local connections are fine for SQLite and are how
+  a service exhausts a Postgres connection limit under exactly the load it was
+  built for.
+- **The storefront has no cart, no session and no payment form.** It renders
+  inventory and explains the contract; the buying happens through the API.
 
 **Linkage:** SE-2's line-item allocation is what makes the proportional refund
-computable. `oms.allocate` and `se2/src/money.py::allocate` are the same
-algorithm because they have to agree to the cent.
+computable, and now also what makes per-line tax computable. `oms.allocate` and
+`se2/src/money.py::allocate` are the same largest-remainder algorithm because they
+have to agree to the cent.

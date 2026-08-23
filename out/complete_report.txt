@@ -1,0 +1,172 @@
+==============================================================================
+SE-1 COMPLETION PASS
+==============================================================================
+
+==============================================================================
+A. PER-LINE TAX -- TWO OF MY OWN PROJECTS DISAGREED ABOUT A NUMBER
+==============================================================================
+The previous README said it plainly: 'SE-2 now models per-line rates;
+SE-1 has not adopted them, so the two projects disagree about tax and
+SE-1 is the wrong one.' Two services in one portfolio computed a
+different tax on the same cart.
+
+  line              gross   discount    taxable  rate bp        tax
+  TEE-BLUE         $49.98     -$8.00     $41.98      875      $3.67
+  MILK             $13.47     -$2.16     $11.31        0      $0.00
+  HEADPHONES       $89.99    -$14.40     $75.59      875      $6.61
+  TOTAL                                                      $10.28
+
+A single cart rate would have charged $11.28 -- $1.00 more, by taxing the
+exempt groceries.
+
+  THERE IS NO CORRECT SINGLE CART RATE when the lines differ, which is
+  exactly why the order-level discount has to be ALLOCATED to lines
+  before tax is computable at all. That is the same allocation SE-2's
+  promo engine and this project's partial refunds both stand on: get it
+  wrong and you are wrong twice, in two systems, months apart.
+
+  MANUFACTURER vs RETAILER discount on the same line:
+    retailer-funded     taxable $41.98  tax $3.67
+    manufacturer-funded taxable $49.98  tax $4.37
+  A retailer discount reduces the taxable receipt; a manufacturer
+  coupon does not, because the retailer is reimbursed. $0.70 of tax on one
+  line, and it is a flag rather than prose because somebody will ask.
+
+==============================================================================
+B. POLICIES THAT WERE CONSTANTS
+==============================================================================
+Repricing between cart and checkout, per CATEGORY and per TIER:
+
+  category     tier         quoted   current     decision    charged
+  apparel      standard     $50.00    $52.00     honoured     $50.00
+  apparel      gold         $50.00    $52.00     honoured     $50.00
+  electronics  standard   $1200.00  $1220.00    reconfirm          -
+  electronics  gold       $1200.00  $1220.00     honoured   $1200.00
+  grocery      standard      $4.49     $4.70     honoured      $4.49
+  apparel      standard     $50.00    $45.00      reduced     $45.00
+
+  The same +$20 rise is HONOURED for a standard apparel shopper and
+  RECONFIRMED for a standard electronics one, because the electronics
+  rule caps at 2% and $20 on a $1,200 item is under the cash cap but
+  over the percentage. The tolerance is the SMALLER of the two, so the
+  percentage binds on expensive items and the cash cap on cheap ones.
+
+  The tier column is a real and slightly uncomfortable decision: a
+  programme that absorbs more for high-value customers IS price
+  discrimination by tenure. It is legal and widespread, and it belongs
+  in a table somebody signed off rather than an if-statement somebody
+  wrote.
+
+------------------------------------------------------------------------------
+Returns: shipping, windows and restocking.
+
+  category       days   full        merch     shipping      restock     refund
+  apparel          10   True       $50.00        $7.95        $0.00     $57.95
+  apparel          10  False       $50.00        $0.00        $0.00     $50.00
+  apparel          90   True       $50.00        $0.00        $0.00    REFUSED
+  electronics       3   True       $50.00        $7.95        $0.00     $57.95
+  electronics      20   True       $50.00        $7.95       -$7.50     $50.45
+  grocery           3   True       $50.00        $0.00        $0.00     $50.00
+
+  SHIPPING COMES BACK ON A FULL RETURN AND NOT ON A PARTIAL ONE, and
+  the reason is not arbitrary: a partial return still required the
+  parcel, so the shipping was consumed. A full return means the
+  shipment should not have happened.
+
+  Electronics carry a restocking fee outside a 7-day grace period, so
+  the fast returns that correlate with a sizing or spec mistake are
+  free and the slow ones -- which correlate with use -- are not.
+
+  The 90-day apparel row is REFUSED, and refusing is a policy outcome
+  the API has to be able to express. The previous version had no window
+  at all, which is not a generous policy, it is an absent one.
+
+------------------------------------------------------------------------------
+Exchanges, including the case the previous pass got wrong:
+
+  even swap                  $32.63 -> $32.63 : none          even exchange moves no money at all
+  upgrade                    $32.63 -> $39.15 : capture       customer pays the difference
+  cheaper, above the floor   $39.15 -> $32.63 : refund        customer is refunded the difference
+  cheaper, below the floor   $32.63 -> $32.00 : store_credit  below the refund floor: issued as credit
+
+  A CHEAPER REPLACEMENT IS NOT SIMPLY A NET REFUND. Below a floor the
+  refund costs more to process than it returns -- payment fees, a
+  statement line the customer queries, a support contact -- so small
+  differences become store credit. The floor is a merchant input, and
+  stating it is the point: the alternative is a silent rounding that
+  customers notice and support cannot explain.
+
+==============================================================================
+C. ALLOCATION THAT CAN SEE TOMORROW
+==============================================================================
+Near DC: 12 units, 3.0 days of cover. Alternative DC is deep in stock
+and further away. Where does the far DC start to win?
+
+  far DC km   near ship     far ship near penalty     near total       winner
+  100             $7.06       $10.50        $5.40         $12.46          FAR
+  300             $7.06       $18.50        $5.40         $12.46         near
+  600             $7.06       $30.50        $5.40         $12.46         near
+  900             $7.06       $42.50        $5.40         $12.46         near
+  1500            $7.06       $66.50        $5.40         $12.46         near
+  3585            $7.06      $149.90        $5.40         $12.46         near
+
+  A MYOPIC SCORER PICKS THE NEAR DC ON EVERY ROW (confirmed), because shipping
+  from 14 km is cheaper than shipping from anywhere. The forward-aware
+  scorer adds $5.40 for draining a DC that has 3.0 days of cover, and
+  that flips the decision once the far DC is within 100 km.
+
+  The flip point is the useful output, not the winner. It says how
+  much scarcity is worth in shipping-distance terms, which is a
+  number a network planner can argue with -- and it is entirely a
+  function of two merchant constants ($6.50 per parcel, $0.04 per km).
+
+  HONEST LIMIT: the penalty is a cover-shortfall heuristic, not a
+  forward-position model. The real version needs a demand forecast per
+  DC, which is ML-1's job and is not wired in here.
+
+==============================================================================
+D. A LOAD TEST THAT IS ACTUALLY A LOAD TEST
+==============================================================================
+The previous one was a thread pool: no think time, no separate client
+process, so p99 contained Python's own scheduler. Three distortions,
+all in the same direction.
+
+  closed loop (think 40ms)   throughput    59.1/s   ok 1.000
+                             service   p50   4.33  p95 119.90  p99 213.77 ms
+                             perceived p50   4.33  p95 119.90  p99 213.77 ms
+
+  open loop (arrivals 6ms)   throughput   729.9/s   ok 1.000
+                             service   p50   0.09  p95   0.24  p99   0.94 ms
+                             perceived p50   1.22  p95  44.57  p99  64.13 ms
+
+  COORDINATED OMISSION, MEASURED.
+
+  closed loop : perceived p99 213.77 ms, service p99 213.77 ms, gap 0.00
+  open loop   : perceived p99 64.13 ms, service p99 0.94 ms, gap 63.19
+
+  The closed loop's gap is ZERO BY CONSTRUCTION, and that is the whole
+  problem with it rather than a good property: a request is 'due' when
+  the client becomes free, so a client that is blocked on a slow
+  response is by definition not late for anything. When the system
+  stalls, the closed loop STOPS SENDING -- the requests that would have
+  queued behind the stall are never issued, and their latency never
+  appears anywhere.
+
+  The open loop fixes its schedule in advance, so a stall shows up as
+  requests that were due and had to wait. That difference is real
+  latency a user experienced and no server-side APM would ever record.
+
+  Note the throughput column as well: 59.1/s closed against 729.9/s open.
+  A closed-loop benchmark reports whatever throughput the system can
+  sustain and calls it capacity, which is circular -- it measured the
+  rate it chose to send.
+
+  Separate PROCESSES matter for a duller reason: threads share the GIL
+  with the server, so every microsecond a client spends parsing is a
+  microsecond the server cannot run. The old number contained the
+  client's own cost.
+
+  STILL NOT A SERVICE LATENCY. Client and server are one machine with
+  no network and no serialisation. These are a floor, and quoting them
+  as production latency would be the same mistake in a new costume.
+

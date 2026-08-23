@@ -1,0 +1,259 @@
+{
+  "tax": {
+    "lines": [
+      {
+        "sku": "TEE-BLUE",
+        "category": "apparel",
+        "gross": 4998,
+        "discount": 800,
+        "taxable": 4198,
+        "rate_bp": 875,
+        "tax": 367,
+        "manufacturer_funded": false
+      },
+      {
+        "sku": "MILK",
+        "category": "grocery",
+        "gross": 1347,
+        "discount": 216,
+        "taxable": 1131,
+        "rate_bp": 0,
+        "tax": 0,
+        "manufacturer_funded": false
+      },
+      {
+        "sku": "HEADPHONES",
+        "category": "electronics",
+        "gross": 8999,
+        "discount": 1440,
+        "taxable": 7559,
+        "rate_bp": 875,
+        "tax": 661,
+        "manufacturer_funded": false
+      }
+    ],
+    "tax_total": 1028,
+    "single_rate_would_charge": 1128,
+    "overcharge_from_single_rate": 100
+  },
+  "repricing": [
+    {
+      "category": "apparel",
+      "tier": "standard",
+      "quoted": 5000,
+      "current": 5200,
+      "decision": "honoured",
+      "charge": 5000,
+      "tolerance": 250,
+      "absorbed": 200
+    },
+    {
+      "category": "apparel",
+      "tier": "gold",
+      "quoted": 5000,
+      "current": 5200,
+      "decision": "honoured",
+      "charge": 5000,
+      "tolerance": 500,
+      "absorbed": 200
+    },
+    {
+      "category": "electronics",
+      "tier": "standard",
+      "quoted": 120000,
+      "current": 122000,
+      "decision": "reconfirm",
+      "charge": null,
+      "tolerance": 500,
+      "rise": 2000
+    },
+    {
+      "category": "electronics",
+      "tier": "gold",
+      "quoted": 120000,
+      "current": 122000,
+      "decision": "honoured",
+      "charge": 120000,
+      "tolerance": 2000,
+      "absorbed": 2000
+    },
+    {
+      "category": "grocery",
+      "tier": "standard",
+      "quoted": 449,
+      "current": 470,
+      "decision": "honoured",
+      "charge": 449,
+      "tolerance": 35,
+      "absorbed": 21
+    },
+    {
+      "category": "apparel",
+      "tier": "standard",
+      "quoted": 5000,
+      "current": 4500,
+      "decision": "reduced",
+      "charge": 4500,
+      "tolerance": 0
+    }
+  ],
+  "returns": [
+    {
+      "category": "apparel",
+      "days": 10,
+      "full": true,
+      "eligible": true,
+      "reason": "within policy",
+      "refund": 5795,
+      "merch_refund": 5000,
+      "shipping_refund": 795,
+      "restocking_fee": 0,
+      "window_days": 60,
+      "days_since_delivery": 10
+    },
+    {
+      "category": "apparel",
+      "days": 10,
+      "full": false,
+      "eligible": true,
+      "reason": "within policy",
+      "refund": 5000,
+      "merch_refund": 5000,
+      "shipping_refund": 0,
+      "restocking_fee": 0,
+      "window_days": 60,
+      "days_since_delivery": 10
+    },
+    {
+      "category": "apparel",
+      "days": 90,
+      "full": true,
+      "eligible": false,
+      "reason": "outside the 60-day window",
+      "refund": 0,
+      "shipping_refund": 0,
+      "restocking_fee": 0
+    },
+    {
+      "category": "electronics",
+      "days": 3,
+      "full": true,
+      "eligible": true,
+      "reason": "within policy",
+      "refund": 5795,
+      "merch_refund": 5000,
+      "shipping_refund": 795,
+      "restocking_fee": 0,
+      "window_days": 30,
+      "days_since_delivery": 3
+    },
+    {
+      "category": "electronics",
+      "days": 20,
+      "full": true,
+      "eligible": true,
+      "reason": "within policy",
+      "refund": 5045,
+      "merch_refund": 5000,
+      "shipping_refund": 795,
+      "restocking_fee": 750,
+      "window_days": 30,
+      "days_since_delivery": 20
+    },
+    {
+      "category": "grocery",
+      "days": 3,
+      "full": true,
+      "eligible": true,
+      "reason": "within policy",
+      "refund": 5000,
+      "merch_refund": 5000,
+      "shipping_refund": 0,
+      "restocking_fee": 0,
+      "window_days": 7,
+      "days_since_delivery": 3
+    }
+  ],
+  "allocation": [
+    {
+      "far_km": 100,
+      "near_ship": 706,
+      "far_ship": 1050,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "FAR"
+    },
+    {
+      "far_km": 300,
+      "near_ship": 706,
+      "far_ship": 1850,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "near"
+    },
+    {
+      "far_km": 600,
+      "near_ship": 706,
+      "far_ship": 3050,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "near"
+    },
+    {
+      "far_km": 900,
+      "near_ship": 706,
+      "far_ship": 4250,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "near"
+    },
+    {
+      "far_km": 1500,
+      "near_ship": 706,
+      "far_ship": 6650,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "near"
+    },
+    {
+      "far_km": 3585,
+      "near_ship": 706,
+      "far_ship": 14990,
+      "near_penalty": 540,
+      "near_total": 1246,
+      "winner": "near"
+    }
+  ],
+  "load": [
+    {
+      "n": 180,
+      "ok_rate": 1.0,
+      "throughput_per_s": 59.14653715490757,
+      "service_p50": 4.328600014559925,
+      "service_p95": 119.89793499815269,
+      "service_p99": 213.767803998199,
+      "perceived_p50": 4.329450021032244,
+      "perceived_p95": 119.89885500515803,
+      "perceived_p99": 213.76964298775485,
+      "omission_gap_p99": 0.0018389895558357239,
+      "label": "closed loop (think 40ms)",
+      "mode": "closed",
+      "wall_seconds": 6.079898834228516
+    },
+    {
+      "n": 180,
+      "ok_rate": 1.0,
+      "throughput_per_s": 729.9444710791648,
+      "service_p50": 0.09419996058568358,
+      "service_p95": 0.23700505262240765,
+      "service_p99": 0.9444380551576772,
+      "perceived_p50": 1.2177727185189724,
+      "perceived_p95": 44.5716899994295,
+      "perceived_p99": 64.13319443468936,
+      "omission_gap_p99": 63.18875637953168,
+      "label": "open loop (arrivals 6ms)",
+      "mode": "open",
+      "wall_seconds": 2.9837260246276855
+    }
+  ]
+}
