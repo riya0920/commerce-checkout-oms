@@ -35,7 +35,7 @@ def main():
     emit("=" * 78)
     if not PG.available():
         emit("No Postgres on %s." % PG.DSN)
-        emit("Start one:  .vendor/pgsql/bin/pg_ctl -D .vendor/pgdata -o '-p 55432' start")
+        emit("Start one:  .vendor/pgsql/bin/pg_ctl -D .vendor/pgdata -o '-p 5433' start")
         return
     emit("PostgreSQL %s, loopback, fsync off." % PG.server_version())
     emit("")

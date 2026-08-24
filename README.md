@@ -308,7 +308,7 @@ and an unretested claim does not become true by being repeated.*
 throughput number. It is the behaviour.
 
 ```bash
-.vendor/pgsql/bin/pg_ctl -D .vendor/pgdata -o "-p 55432" start
+.vendor/pgsql/bin/pg_ctl -D .vendor/pgdata -o "-p 5433" start
 python run_postgres.py
 ```
 
