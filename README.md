@@ -4,14 +4,15 @@
 two mechanisms, capture-unknown reconciliation, a crash-safe sweeper, an
 append-only money ledger, **per-line tax adopted from SE-2**, policy tables where
 constants used to be, **forward-looking allocation**, a **time-bucketed funnel**,
-an HTTP surface with real authorisation, and a load generator that measures
-coordinated omission.
+an HTTP surface with real authorisation, a load generator that measures
+coordinated omission, and **allocation priced against ML-1's forecast
+distribution** rather than a cover ratio.
 
 ```bash
 python run_flashsale.py      # ~2min  the concurrency drills
 python run_complete.py       # ~30s   tax, policies, allocation, the load test
 uvicorn serve:app --port 8010   #      storefront, checkout, ops view
-python -m pytest tests -q    # 76 tests
+python -m pytest tests -q    # 89 tests
 ```
 
 ## Two of my own projects disagreed about a number
@@ -126,6 +127,89 @@ per km).
 > away, where the shipping difference is $143 and no plausible penalty could ever
 > flip it. It demonstrated a mechanism that could not matter.
 
+## The forecast, wired in — allocation against a distribution
+
+The section above priced scarcity as a **cover shortfall**: how far below a
+seven-day floor the DC lands. This project called that what it was — *"a heuristic
+standing in for a real forward-position model, and the real version needs a demand
+forecast per DC, which is ML-1's job"*. It is now ML-1's job done.
+
+This is the **second consumer** of ML-1's block bootstrap. DATA-2 needs demand
+*summed* over a lead time, to size an order-up-to level. This needs the **daily
+path**, because the question is not "how much will be needed" but "will this DC run
+out before the truck arrives" — and a replenishment landing on day 4 decides which
+shortfalls happen. ML-1 grew `leadtime_daily_paths` for it, and `leadtime_samples`
+now delegates to it so there is one bootstrap and not two.
+
+**What is borrowed is the shape of the uncertainty, not the demand level.** These
+SKUs are not M5 items. Each sampled path is rescaled so its mean matches the DC's
+own daily demand; what comes from ML-1 is the dispersion and the autocorrelation
+the block bootstrap preserves. Importing somebody else's demand level and calling
+it a forecast integration would make every number below a property of ML-1's panel.
+
+| scenario | myopic | heuristic | forecast |
+|---|---|---|---|
+| near thin, far deep and near | NEAR $390.16 | **FAR $339.60** | **FAR $339.60** |
+| near thin, far deep and far | NEAR $390.16 | NEAR $390.16 | **FAR $347.60** |
+| both comfortable | NEAR $7.06 | NEAR $7.06 | NEAR $7.06 |
+| near thin, far also thin | NEAR $652.70 | NEAR $652.70 | NEAR $652.70 |
+| **total** | $1,440.08 | $1,389.52 | **$1,346.96** |
+
+Cost is shipping plus realised lost margin. **The forecast policy is priced on one
+half of the bootstrap and graded on the other** — a model scored on the samples
+that priced it is grading its own assumptions and wins every time without meaning
+anything. All three policies face the same held-out futures.
+
+> The first version of this table had all four rows reading `heuristic == myopic`,
+> because the near DC never fell below the seven-day floor and the heuristic never
+> fired. A comparison against a policy that cannot move is a straw man wearing the
+> baseline's answers.
+
+### Where the two differ in kind
+
+**The heuristic cannot see variance.** Two DCs, identical stock and identical days
+of cover, different demand variability:
+
+| | heuristic | forecast |
+|---|---|---|
+| steady demand | 0 cents | 212 cents |
+| spiky demand | 0 cents | **1,310 cents** |
+
+Days of cover is a function of the **mean**, so those two DCs are the same number
+to it. They are not the same risk.
+
+**Both have a ceiling — that is not what I expected to write, and the measurement
+is what corrected it.**
+
+| on hand | heuristic | forecast |
+|---|---|---|
+| 20 | 420 | 5,400 |
+| 12 | 660 | 5,400 |
+| 6 | **840** (max) | 5,400 |
+| 0 | **840** | **0** |
+
+The forecast penalty saturates at **5,400 = 6 units × 900 cents of margin**. The
+difference is *where the ceiling comes from*: the heuristic's 840 is seven days
+times a rate, both typed into a signature, bounding the penalty at a number with no
+economic meaning — a merchant who widens the shipping gap past **$8.40** silently
+turns the whole mechanism off. The forecast's ceiling is the true bound: **you
+cannot lose more margin than the units you shipped were worth.**
+
+The last row is the same fact from the other side. An **empty** DC has a forecast
+penalty of zero, because shipping from it protects nothing that was not already
+lost — while the heuristic still charges its maximum. **Charging to protect stock
+that does not exist is a proxy come loose from the thing it proxied for.**
+
+And the obvious criticism of the heuristic is the wrong one: the cover charge is
+**continuous** at the floor, rising from zero as cover falls through it. There is no
+cliff. There is a kink at a number somebody typed, and saturation a few days later.
+A test pins that, so nobody "fixes" a discontinuity that is not there.
+
+**What this does not fix:** the horizon and the stockout cost are still merchant
+inputs, and the second is doing more work than anything the forecast contributes —
+at a low enough stockout cost every policy here collapses to the myopic one. ML-1
+supplies the distribution; it cannot supply what a lost order is worth.
+
 ## A load test that is actually a load test
 
 | | throughput | service p99 | perceived p99 | omission gap |
@@ -214,14 +298,23 @@ view reports as fine.
 - **No tax jurisdiction model.** Rates are per-category. Nexus, destination vs
   origin sourcing and product taxability codes are the actual hard part and are
   entirely absent.
-- **Allocation is still a heuristic.** The scarcity penalty is a cover-shortfall
-  charge, not a forward-position model — the real version needs a demand forecast
-  per DC, which is ML-1's job and is not wired in.
+- **Allocation optimises one order at a time.** The forward-position model prices
+  the marginal unit correctly and there is still no lookahead over the *queue* of
+  orders behind it: allocating ten orders greedily by marginal cost is not the
+  same as allocating ten orders. That is a stochastic programme and it is not here.
+- **The stockout cost is a constant.** One number for every SKU, and it is the
+  input the whole section is most sensitive to.
 - **No connection pool.** Thread-local connections are fine for SQLite and are how
   a service exhausts a Postgres connection limit under exactly the load it was
   built for.
 - **The storefront has no cart, no session and no payment form.** It renders
   inventory and explains the contract; the buying happens through the API.
+
+**Linkage to ML-1:** `forward_position.py` loads ML-1's block bootstrap by file
+path and consumes daily demand paths, which is the same join DATA-2 makes from the
+other side and for a different question. Both projects import ML-1's *estimator*
+rather than copying it, so if ML-1 changes what the distribution is, both change
+with it.
 
 **Linkage:** SE-2's line-item allocation is what makes the proportional refund
 computable, and now also what makes per-line tax computable. `oms.allocate` and

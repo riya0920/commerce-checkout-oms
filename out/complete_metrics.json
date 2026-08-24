@@ -228,32 +228,79 @@
     {
       "n": 180,
       "ok_rate": 1.0,
-      "throughput_per_s": 59.14653715490757,
-      "service_p50": 4.328600014559925,
-      "service_p95": 119.89793499815269,
-      "service_p99": 213.767803998199,
-      "perceived_p50": 4.329450021032244,
-      "perceived_p95": 119.89885500515803,
-      "perceived_p99": 213.76964298775485,
-      "omission_gap_p99": 0.0018389895558357239,
+      "throughput_per_s": 110.35393326557417,
+      "service_p50": 3.3768999855965376,
+      "service_p95": 50.14252994442357,
+      "service_p99": 72.85660994821234,
+      "perceived_p50": 3.377899993211031,
+      "perceived_p95": 50.14333995059131,
+      "perceived_p99": 72.85750995506538,
+      "omission_gap_p99": 0.000900006853044033,
       "label": "closed loop (think 40ms)",
       "mode": "closed",
-      "wall_seconds": 6.079898834228516
+      "wall_seconds": 11.25965166091919
     },
     {
       "n": 180,
       "ok_rate": 1.0,
-      "throughput_per_s": 729.9444710791648,
-      "service_p50": 0.09419996058568358,
-      "service_p95": 0.23700505262240765,
-      "service_p99": 0.9444380551576772,
-      "perceived_p50": 1.2177727185189724,
-      "perceived_p95": 44.5716899994295,
-      "perceived_p99": 64.13319443468936,
-      "omission_gap_p99": 63.18875637953168,
+      "throughput_per_s": 970.3953926154572,
+      "service_p50": 0.12349995085969567,
+      "service_p95": 0.6192050408571952,
+      "service_p99": 1.3719949917867853,
+      "perceived_p50": 0.8443336701020598,
+      "perceived_p95": 6.061984621919681,
+      "perceived_p99": 9.860600266838448,
+      "omission_gap_p99": 8.488605275051663,
       "label": "open loop (arrivals 6ms)",
       "mode": "open",
-      "wall_seconds": 2.9837260246276855
+      "wall_seconds": 4.820868730545044
     }
-  ]
+  ],
+  "forward_position": {
+    "available": true,
+    "pool": 3360,
+    "totals": {
+      "myopic": 1440.0810152260365,
+      "heuristic": 1389.5210152260365,
+      "forecast": 1346.9610152260366
+    },
+    "scenarios": [
+      {
+        "scenario": "near thin, far deep and near",
+        "myopic": "NEAR",
+        "myopic_cost": 390.16093433732027,
+        "heuristic": "FAR",
+        "heuristic_cost": 339.60093433732027,
+        "forecast": "FAR",
+        "forecast_cost": 339.60093433732027
+      },
+      {
+        "scenario": "near thin, far deep and far",
+        "myopic": "NEAR",
+        "myopic_cost": 390.16093433732027,
+        "heuristic": "NEAR",
+        "heuristic_cost": 390.16093433732027,
+        "forecast": "FAR",
+        "forecast_cost": 347.60093433732027
+      },
+      {
+        "scenario": "both comfortable",
+        "myopic": "NEAR",
+        "myopic_cost": 7.06,
+        "heuristic": "NEAR",
+        "heuristic_cost": 7.06,
+        "forecast": "NEAR",
+        "forecast_cost": 7.06
+      },
+      {
+        "scenario": "near thin, far also thin",
+        "myopic": "NEAR",
+        "myopic_cost": 652.699146551396,
+        "heuristic": "NEAR",
+        "heuristic_cost": 652.699146551396,
+        "forecast": "NEAR",
+        "forecast_cost": 652.699146551396
+      }
+    ]
+  }
 }

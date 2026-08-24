@@ -131,18 +131,18 @@ The previous one was a thread pool: no think time, no separate client
 process, so p99 contained Python's own scheduler. Three distortions,
 all in the same direction.
 
-  closed loop (think 40ms)   throughput    59.1/s   ok 1.000
-                             service   p50   4.33  p95 119.90  p99 213.77 ms
-                             perceived p50   4.33  p95 119.90  p99 213.77 ms
+  closed loop (think 40ms)   throughput   110.4/s   ok 1.000
+                             service   p50   3.38  p95  50.14  p99  72.86 ms
+                             perceived p50   3.38  p95  50.14  p99  72.86 ms
 
-  open loop (arrivals 6ms)   throughput   729.9/s   ok 1.000
-                             service   p50   0.09  p95   0.24  p99   0.94 ms
-                             perceived p50   1.22  p95  44.57  p99  64.13 ms
+  open loop (arrivals 6ms)   throughput   970.4/s   ok 1.000
+                             service   p50   0.12  p95   0.62  p99   1.37 ms
+                             perceived p50   0.84  p95   6.06  p99   9.86 ms
 
   COORDINATED OMISSION, MEASURED.
 
-  closed loop : perceived p99 213.77 ms, service p99 213.77 ms, gap 0.00
-  open loop   : perceived p99 64.13 ms, service p99 0.94 ms, gap 63.19
+  closed loop : perceived p99 72.86 ms, service p99 72.86 ms, gap 0.00
+  open loop   : perceived p99 9.86 ms, service p99 1.37 ms, gap 8.49
 
   The closed loop's gap is ZERO BY CONSTRUCTION, and that is the whole
   problem with it rather than a good property: a request is 'due' when
@@ -156,7 +156,7 @@ all in the same direction.
   requests that were due and had to wait. That difference is real
   latency a user experienced and no server-side APM would ever record.
 
-  Note the throughput column as well: 59.1/s closed against 729.9/s open.
+  Note the throughput column as well: 110.4/s closed against 970.4/s open.
   A closed-loop benchmark reports whatever throughput the system can
   sustain and calls it capacity, which is circular -- it measured the
   rate it chose to send.
@@ -169,4 +169,98 @@ all in the same direction.
   STILL NOT A SERVICE LATENCY. Client and server are one machine with
   no network and no serialisation. These are a floor, and quoting them
   as production latency would be the same mistake in a new costume.
+
+==============================================================================
+E. THE FORECAST, WIRED IN -- ALLOCATION AGAINST A DISTRIBUTION
+==============================================================================
+The section above priced scarcity as a COVER SHORTFALL: how far below a
+seven-day floor the DC lands. This project called that what it is --
+'a heuristic standing in for a real forward-position model, and the real
+version needs a demand forecast per DC, which is ML-1's job'. It is now
+ML-1's job done.
+
+  Pooled standardised forecast errors from ML-1: 3360, sd 1.717.
+  What is borrowed is the SHAPE of the uncertainty -- dispersion and
+  the autocorrelation the block bootstrap preserves. The demand LEVEL
+  stays SE-1's, because these SKUs are not M5 items and importing
+  somebody else's level would make every number below a property of
+  ML-1's panel rather than of this allocator.
+
+                    scenario myopic  myopic_cost heuristic  heuristic_cost forecast  forecast_cost
+near thin, far deep and near   NEAR       390.16       FAR          339.60      FAR         339.60
+ near thin, far deep and far   NEAR       390.16      NEAR          390.16      FAR         347.60
+            both comfortable   NEAR         7.06      NEAR            7.06     NEAR           7.06
+    near thin, far also thin   NEAR       652.70      NEAR          652.70     NEAR         652.70
+
+  Cost is shipping plus realised lost margin, in dollars, scored on
+  the HELD-OUT half of the bootstrap. The forecast policy is priced
+  on one half and graded on the other; a model scored on the samples
+  that priced it is grading its own assumptions, and would win every
+  time without meaning anything.
+
+  Total across the four scenarios:  myopic $1440.08   heuristic $1389.52   forecast $1346.96
+  Cheapest: forecast.
+
+  The two informed policies disagree on 1 of 4 scenarios.
+    near thin, far deep and far heuristic->NEAR $ 390.16   forecast->FAR  $ 347.60
+
+WHERE THE TWO DIFFER IN KIND, not just in number:
+
+  Two DCs, identical stock (70) and identical days of cover (17.5),
+  different demand VARIABILITY:
+
+    heuristic penalty, steady :      0 cents
+    heuristic penalty, spiky  :      0 cents
+    forecast penalty, steady  :    212 cents
+    forecast penalty, spiky   :   1310 cents
+
+  THE HEURISTIC CANNOT TELL THEM APART. Days of cover is a function
+  of the MEAN, so two DCs with the same cover and different variance
+  are the same number to it. They are not the same risk, and the
+  difference is not small.
+
+  The second structural difference is a CEILING, and it is the one
+  that decides whether the heuristic can ever change an answer.
+
+  Largest penalty the cover-shortfall charge can EVER return: 840
+  cents -- seven days times 120 a day, reached when the DC is empty.
+  So it cannot flip a decision against a shipping gap wider than
+  $8.40, no matter how badly the DC is about to run out.
+
+    on hand  20  ->  heuristic  420 cents, forecast  5400 cents
+    on hand  12  ->  heuristic  660 cents, forecast  5400 cents
+    on hand   6  ->  heuristic  840 cents, forecast  5400 cents
+    on hand   0  ->  heuristic  840 cents, forecast     0 cents
+
+  BOTH HAVE A CEILING. That is not what I expected to write, and the
+  table above is what corrected it -- the forecast column saturates
+  at 5400 cents, which is 6 units times 900 cents of margin.
+
+  The difference is WHERE the ceiling comes from. The heuristic's
+  840 is seven days times a rate, both typed into a signature; it
+  bounds the penalty at a number with no economic meaning, and a
+  merchant who widens the shipping gap past $8.40 silently turns the
+  whole mechanism off. The forecast's ceiling is the true bound: you
+  cannot lose more margin than the units you shipped were worth, so
+  it saturates exactly when shipping these units guarantees losing
+  all of them.
+
+  The last row is the same fact from the other side. An EMPTY DC has
+  a forecast penalty of zero, because shipping from it protects
+  nothing that was not already lost -- while the heuristic still
+  charges its maximum 840. Charging to protect stock that does not
+  exist is the clearest case of a proxy having come loose from the
+  thing it was proxying for.
+
+  And the obvious criticism of the heuristic is the wrong one: the
+  cover charge is CONTINUOUS at the seven-day floor, rising from zero
+  as cover falls through it. There is no cliff. What there is, is a
+  kink at a number somebody typed and a saturation point a few days
+  later.
+
+  WHAT THIS DOES NOT FIX: the horizon and the stockout cost are
+  still merchant inputs, and the second one is doing more work than
+  anything the forecast contributes -- at a low enough stockout cost
+  every policy here collapses to the myopic one. ML-1 supplies the
+  distribution; it cannot supply what a lost order is worth.
 

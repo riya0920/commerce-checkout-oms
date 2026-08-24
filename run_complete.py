@@ -11,12 +11,14 @@ import sys
 import time
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src import allocation as ALLOC   # noqa: E402
 from src import checkout as CO        # noqa: E402
 from src import db as DB              # noqa: E402
 from src import loadgen as LG         # noqa: E402
+from src import forward_position as FP
 from src import policies as POL       # noqa: E402
 from src import psp as PSP            # noqa: E402
 from src import taxpolicy as TAX      # noqa: E402
@@ -317,6 +319,199 @@ def main():
     emit("  as production latency would be the same mistake in a new costume.")
     emit("")
     summary["load"] = rows
+
+    # ======================================================================
+    emit("=" * 78)
+    emit("E. THE FORECAST, WIRED IN -- ALLOCATION AGAINST A DISTRIBUTION")
+    emit("=" * 78)
+    emit("The section above priced scarcity as a COVER SHORTFALL: how far below a")
+    emit("seven-day floor the DC lands. This project called that what it is --")
+    emit("'a heuristic standing in for a real forward-position model, and the real")
+    emit("version needs a demand forecast per DC, which is ML-1's job'. It is now")
+    emit("ML-1's job done.")
+    emit("")
+    if not FP.ml1_available():
+        emit("  ML-1 artifacts not found; run ml1-forecast-to-price/run_forecast.py")
+        emit("  first. This section needs out/quantile_raw.pkl.")
+        summary["forward_position"] = dict(available=False)
+    else:
+        pool = FP.error_pool()
+        emit("  Pooled standardised forecast errors from ML-1: %d, sd %.3f."
+             % (len(pool), pool.std()))
+        emit("  What is borrowed is the SHAPE of the uncertainty -- dispersion and")
+        emit("  the autocorrelation the block bootstrap preserves. The demand LEVEL")
+        emit("  stays SE-1's, because these SKUs are not M5 items and importing")
+        emit("  somebody else's level would make every number below a property of")
+        emit("  ML-1's panel rather than of this allocator.")
+        emit("")
+        HORIZON = 14
+        STOCKOUT_CENTS = 900          # margin lost on an order that cannot ship
+        SHIP_BASE, SHIP_PER_KM = 650, 4
+        # The near DC has to land BELOW the seven-day floor for the heuristic to
+        # fire at all, and the far DC has to be close enough that the heuristic's
+        # penalty could plausibly outweigh the shipping gap. Scenarios where the
+        # heuristic can never move would make it a straw man wearing the myopic
+        # policy's answers -- the first version of this table did exactly that,
+        # and all four rows read heuristic == myopic.
+        scenarios = [
+            # name, near on-hand, near daily, far on-hand, far daily, far km
+            ("near thin, far deep and near",   20, 4.0, 260, 4.0, 100),
+            ("near thin, far deep and far",    20, 4.0, 260, 4.0, 300),
+            ("both comfortable",              220, 4.0, 260, 4.0, 100),
+            ("near thin, far also thin",       20, 4.0,  26, 4.0, 100),
+        ]
+        rows = []
+        for name, n_oh, n_dd, f_oh, f_dd, f_km in scenarios:
+            near_paths = FP.demand_paths(n_dd, HORIZON, pool, n_samples=1200,
+                                         seed=1)
+            far_paths = FP.demand_paths(f_dd, HORIZON, pool, n_samples=1200,
+                                        seed=2)
+            n_price, n_score = FP.split_paths(near_paths)
+            f_price, f_score = FP.split_paths(far_paths)
+            near_ship = SHIP_BASE + SHIP_PER_KM * 14
+            far_ship = SHIP_BASE + SHIP_PER_KM * f_km
+            qty = 6
+
+            near_dc = POL.DCPosition(name="NEAR", on_hand={"SKU": n_oh},
+                                     km=14.0, daily_demand={"SKU": n_dd})
+            far_dc = POL.DCPosition(name="FAR", on_hand={"SKU": f_oh},
+                                    km=float(f_km), daily_demand={"SKU": f_dd})
+
+            choices = {}
+            choices["myopic"] = "NEAR" if near_ship <= far_ship else "FAR"
+
+            h_near = near_ship + POL.scarcity_penalty_cents(near_dc, "SKU", qty)
+            h_far = far_ship + POL.scarcity_penalty_cents(far_dc, "SKU", qty)
+            choices["heuristic"] = "NEAR" if h_near <= h_far else "FAR"
+
+            f_near = near_ship + FP.scarcity_penalty_forecast_cents(
+                n_price, n_oh, qty, STOCKOUT_CENTS)
+            f_far = far_ship + FP.scarcity_penalty_forecast_cents(
+                f_price, f_oh, qty, STOCKOUT_CENTS)
+            choices["forecast"] = "NEAR" if f_near <= f_far else "FAR"
+
+            # score every policy on the SAME held-out futures
+            def realised(pick):
+                ship = near_ship if pick == "NEAR" else far_ship
+                n_left = n_oh - (qty if pick == "NEAR" else 0)
+                f_left = f_oh - (qty if pick == "FAR" else 0)
+                lost = (FP.expected_shortfall(n_score, n_left)
+                        + FP.expected_shortfall(f_score, f_left))
+                return ship + lost * STOCKOUT_CENTS
+
+            row = dict(scenario=name)
+            for pol in ("myopic", "heuristic", "forecast"):
+                row[pol] = choices[pol]
+                row[pol + "_cost"] = realised(choices[pol]) / 100.0
+            rows.append(row)
+        A = pd.DataFrame(rows)
+        emit(A.to_string(index=False, float_format=lambda x: "%9.2f" % x))
+        emit("")
+        emit("  Cost is shipping plus realised lost margin, in dollars, scored on")
+        emit("  the HELD-OUT half of the bootstrap. The forecast policy is priced")
+        emit("  on one half and graded on the other; a model scored on the samples")
+        emit("  that priced it is grading its own assumptions, and would win every")
+        emit("  time without meaning anything.")
+        emit("")
+        tot = {p: float(A[p + "_cost"].sum()) for p in
+               ("myopic", "heuristic", "forecast")}
+        emit("  Total across the four scenarios:  " + "   ".join(
+            "%s $%.2f" % (k, v) for k, v in tot.items()))
+        best = min(tot, key=tot.get)
+        emit("  Cheapest: %s." % best)
+        emit("")
+        disagree = A[(A.heuristic != A.forecast)]
+        emit("  The two informed policies disagree on %d of %d scenarios."
+             % (len(disagree), len(A)))
+        if len(disagree):
+            for _, r in disagree.iterrows():
+                emit("    %-26s heuristic->%-4s $%7.2f   forecast->%-4s $%7.2f"
+                     % (r.scenario, r.heuristic, r.heuristic_cost,
+                        r.forecast, r.forecast_cost))
+        emit("")
+        emit("WHERE THE TWO DIFFER IN KIND, not just in number:")
+        emit("")
+        v_lo = FP.demand_paths(4.0, HORIZON, pool * 0.35, n_samples=1200, seed=7)
+        v_hi = FP.demand_paths(4.0, HORIZON, pool * 1.9, n_samples=1200, seed=7)
+        steady = POL.DCPosition(name="STEADY", on_hand={"SKU": 70}, km=14.0,
+                                daily_demand={"SKU": 4.0})
+        spiky = POL.DCPosition(name="SPIKY", on_hand={"SKU": 70}, km=14.0,
+                               daily_demand={"SKU": 4.0})
+        emit("  Two DCs, identical stock (70) and identical days of cover (17.5),")
+        emit("  different demand VARIABILITY:")
+        emit("")
+        emit("    heuristic penalty, steady : %6d cents"
+             % POL.scarcity_penalty_cents(steady, "SKU", 6))
+        emit("    heuristic penalty, spiky  : %6d cents"
+             % POL.scarcity_penalty_cents(spiky, "SKU", 6))
+        emit("    forecast penalty, steady  : %6d cents"
+             % FP.scarcity_penalty_forecast_cents(v_lo, 70, 6, STOCKOUT_CENTS))
+        emit("    forecast penalty, spiky   : %6d cents"
+             % FP.scarcity_penalty_forecast_cents(v_hi, 70, 6, STOCKOUT_CENTS))
+        emit("")
+        emit("  THE HEURISTIC CANNOT TELL THEM APART. Days of cover is a function")
+        emit("  of the MEAN, so two DCs with the same cover and different variance")
+        emit("  are the same number to it. They are not the same risk, and the")
+        emit("  difference is not small.")
+        emit("")
+        emit("  The second structural difference is a CEILING, and it is the one")
+        emit("  that decides whether the heuristic can ever change an answer.")
+        emit("")
+        cap = POL.scarcity_penalty_cents(
+            POL.DCPosition(name="X", on_hand={"SKU": 0}, km=14.0,
+                           daily_demand={"SKU": 4.0}), "SKU", 6)
+        emit("  Largest penalty the cover-shortfall charge can EVER return: %d"
+             % cap)
+        emit("  cents -- seven days times 120 a day, reached when the DC is empty.")
+        emit("  So it cannot flip a decision against a shipping gap wider than")
+        emit("  $%.2f, no matter how badly the DC is about to run out." % (cap / 100))
+        emit("")
+        for oh in (20, 12, 6, 0):
+            emit("    on hand %3d  ->  heuristic %4d cents, forecast %5d cents"
+                 % (oh, POL.scarcity_penalty_cents(
+                        POL.DCPosition(name="X", on_hand={"SKU": oh}, km=14.0,
+                                       daily_demand={"SKU": 4.0}), "SKU", 6),
+                    FP.scarcity_penalty_forecast_cents(
+                        FP.demand_paths(4.0, HORIZON, pool, n_samples=1200,
+                                        seed=1)[600:], oh, 6, STOCKOUT_CENTS)))
+        emit("")
+        emit("  BOTH HAVE A CEILING. That is not what I expected to write, and the")
+        emit("  table above is what corrected it -- the forecast column saturates")
+        emit("  at %d cents, which is %d units times %d cents of margin."
+             % (6 * STOCKOUT_CENTS, 6, STOCKOUT_CENTS))
+        emit("")
+        emit("  The difference is WHERE the ceiling comes from. The heuristic's")
+        emit("  %d is seven days times a rate, both typed into a signature; it" % cap)
+        emit("  bounds the penalty at a number with no economic meaning, and a")
+        emit("  merchant who widens the shipping gap past $%.2f silently turns the"
+             % (cap / 100))
+        emit("  whole mechanism off. The forecast's ceiling is the true bound: you")
+        emit("  cannot lose more margin than the units you shipped were worth, so")
+        emit("  it saturates exactly when shipping these units guarantees losing")
+        emit("  all of them.")
+        emit("")
+        emit("  The last row is the same fact from the other side. An EMPTY DC has")
+        emit("  a forecast penalty of zero, because shipping from it protects")
+        emit("  nothing that was not already lost -- while the heuristic still")
+        emit("  charges its maximum %d. Charging to protect stock that does not" % cap)
+        emit("  exist is the clearest case of a proxy having come loose from the")
+        emit("  thing it was proxying for.")
+        emit("")
+        emit("  And the obvious criticism of the heuristic is the wrong one: the")
+        emit("  cover charge is CONTINUOUS at the seven-day floor, rising from zero")
+        emit("  as cover falls through it. There is no cliff. What there is, is a")
+        emit("  kink at a number somebody typed and a saturation point a few days")
+        emit("  later.")
+        emit("")
+        emit("  WHAT THIS DOES NOT FIX: the horizon and the stockout cost are")
+        emit("  still merchant inputs, and the second one is doing more work than")
+        emit("  anything the forecast contributes -- at a low enough stockout cost")
+        emit("  every policy here collapses to the myopic one. ML-1 supplies the")
+        emit("  distribution; it cannot supply what a lost order is worth.")
+        emit("")
+        summary["forward_position"] = dict(
+            available=True, pool=len(pool), totals=tot,
+            scenarios=A.to_dict("records"))
 
     with open(os.path.join(OUT, "complete_report.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
