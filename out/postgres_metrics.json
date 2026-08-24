@@ -1,0 +1,243 @@
+{
+  "sweep": [
+    {
+      "engine": "sqlite",
+      "mechanism": "optimistic",
+      "skus": 1,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 49,
+      "oversell": 0,
+      "seconds": 1.4161,
+      "throughput": 451.9614
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "optimistic",
+      "skus": 1,
+      "granted": 277,
+      "attempted": 640,
+      "starved_share": 0.5672,
+      "retries": 427,
+      "oversell": 0,
+      "seconds": 8.5608,
+      "throughput": 32.3567
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "pessimistic",
+      "skus": 1,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 0.8091,
+      "throughput": 790.9798
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "pessimistic",
+      "skus": 1,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 6.3037,
+      "throughput": 101.5272
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "optimistic",
+      "skus": 4,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 44,
+      "oversell": 0,
+      "seconds": 0.4956,
+      "throughput": 1291.4544
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "optimistic",
+      "skus": 4,
+      "granted": 588,
+      "attempted": 640,
+      "starved_share": 0.0812,
+      "retries": 847,
+      "oversell": 0,
+      "seconds": 5.6365,
+      "throughput": 104.3196
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "pessimistic",
+      "skus": 4,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 1.0366,
+      "throughput": 617.3986
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "pessimistic",
+      "skus": 4,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 6.0766,
+      "throughput": 105.3219
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "optimistic",
+      "skus": 16,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 43,
+      "oversell": 0,
+      "seconds": 1.4297,
+      "throughput": 447.6588
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "optimistic",
+      "skus": 16,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 196,
+      "oversell": 0,
+      "seconds": 4.9947,
+      "throughput": 128.135
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "pessimistic",
+      "skus": 16,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 0.8547,
+      "throughput": 748.8395
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "pessimistic",
+      "skus": 16,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 4.7622,
+      "throughput": 134.392
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "optimistic",
+      "skus": 64,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 27,
+      "oversell": 0,
+      "seconds": 0.5031,
+      "throughput": 1272.0962
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "optimistic",
+      "skus": 64,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 153,
+      "oversell": 0,
+      "seconds": 6.2155,
+      "throughput": 102.9689
+    },
+    {
+      "engine": "sqlite",
+      "mechanism": "pessimistic",
+      "skus": 64,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 0.9681,
+      "throughput": 661.0629
+    },
+    {
+      "engine": "postgres",
+      "mechanism": "pessimistic",
+      "skus": 64,
+      "granted": 640,
+      "attempted": 640,
+      "starved_share": 0.0,
+      "retries": 0,
+      "oversell": 0,
+      "seconds": 4.6604,
+      "throughput": 137.326
+    }
+  ],
+  "retry_budget": [
+    {
+      "max_retries": 4,
+      "granted": 171,
+      "attempted": 640,
+      "starved": 469,
+      "starved_share": 0.7328125,
+      "retries": 115,
+      "seconds": 5.4401034999173135
+    },
+    {
+      "max_retries": 8,
+      "granted": 285,
+      "attempted": 640,
+      "starved": 355,
+      "starved_share": 0.5546875,
+      "retries": 434,
+      "seconds": 6.380151099991053
+    },
+    {
+      "max_retries": 16,
+      "granted": 438,
+      "attempted": 640,
+      "starved": 202,
+      "starved_share": 0.315625,
+      "retries": 1644,
+      "seconds": 7.836296399938874
+    },
+    {
+      "max_retries": 32,
+      "granted": 559,
+      "attempted": 640,
+      "starved": 81,
+      "starved_share": 0.1265625,
+      "retries": 3459,
+      "seconds": 9.038620000006631
+    },
+    {
+      "max_retries": 64,
+      "granted": 626,
+      "attempted": 640,
+      "starved": 14,
+      "starved_share": 0.021875,
+      "retries": 5203,
+      "seconds": 10.285426700022072
+    }
+  ]
+}

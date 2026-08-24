@@ -5,14 +5,16 @@ two mechanisms, capture-unknown reconciliation, a crash-safe sweeper, an
 append-only money ledger, **per-line tax adopted from SE-2**, policy tables where
 constants used to be, **forward-looking allocation**, a **time-bucketed funnel**,
 an HTTP surface with real authorisation, a load generator that measures
-coordinated omission, and **allocation priced against ML-1's forecast
-distribution** rather than a cover ratio.
+coordinated omission, **allocation priced against ML-1's forecast distribution**
+rather than a cover ratio, and **the contention drill re-run on real
+PostgreSQL**, where the optimistic mechanism turns out to fail in a way SQLite
+cannot express.
 
 ```bash
 python run_flashsale.py      # ~2min  the concurrency drills
 python run_complete.py       # ~30s   tax, policies, allocation, the load test
 uvicorn serve:app --port 8010   #      storefront, checkout, ops view
-python -m pytest tests -q    # 89 tests
+python -m pytest tests -q    # 100 tests
 ```
 
 ## Two of my own projects disagreed about a number
@@ -288,13 +290,103 @@ ago still reads 88% lifetime after a week of healthy traffic. A test asserts
 exactly that: the bucketed view detects a planted regression that the lifetime
 view reports as fine.
 
+## Real Postgres — and a caveat this project repeated for four passes
+
+Every previous README said this:
+
+> *"SQLite, not Postgres, and no Postgres binary is installable in this
+> environment. [...] The conditional-`UPDATE` shape transfers; the throughput
+> number does not."*
+
+**The first clause was false.** The official PostgreSQL Windows x64 binaries are a
+297 MB zip that unpacks and runs `initdb` into a local directory — no installer,
+no service registration, no administrator rights. The claim was written in the
+first pass and repeated three times without being retested. *A caveat is a claim,
+and an unretested claim does not become true by being repeated.*
+
+**And the second clause was understated.** What fails to transfer is not the
+throughput number. It is the behaviour.
+
+```bash
+.vendor/pgsql/bin/pg_ctl -D .vendor/pgdata -o "-p 55432" start
+python run_postgres.py
+```
+
+### The same drill, both engines, 16 workers, ample stock
+
+| engine | mechanism | SKUs | granted / attempted | starved | retries | oversells |
+|---|---|---|---|---|---|---|
+| sqlite | optimistic | 1 | 640 / 640 | **0.0%** | 49 | 0 |
+| **postgres** | optimistic | 1 | **277 / 640** | **56.7%** | 427 | 0 |
+| sqlite | pessimistic | 1 | 640 / 640 | 0.0% | 0 | 0 |
+| postgres | pessimistic | 1 | 640 / 640 | 0.0% | 0 | 0 |
+| postgres | optimistic | 4 | 588 / 640 | 8.1% | 847 | 0 |
+| postgres | optimistic | 16 | 640 / 640 | 0.0% | 196 | 0 |
+| postgres | optimistic | 64 | 640 / 640 | 0.0% | 153 | 0 |
+
+Stock is ample everywhere, so **every "starved" request is one that failed with
+stock on the shelf** — the optimistic path exhausting its retry budget. Nothing
+here is a real sellout.
+
+**Oversells: 0 on every row of both engines.** That is the part that did transfer,
+and it is the part the mechanism exists for.
+
+**Now read the two one-SKU optimistic rows against each other.** Identical code,
+identical workload: SQLite starves 0% and Postgres starves 56.7%.
+
+The reason is not that SQLite is better. **SQLite serialises writers**, so a
+compare-and-set has nothing to lose a race to — the version cannot move under a
+caller who holds the only write lock in the database. **The optimistic
+mechanism's characteristic failure is invisible there by construction.** Not
+smaller. Invisible.
+
+Which means the earlier benchmark was not a weak measurement of
+optimistic-versus-pessimistic concurrency. **It was a measurement of something
+else, carrying that name.**
+
+Spreading the same workload across more rows removes it entirely (56.7% → 8.1% →
+0.0%), and *that* is the data-model question the old benchmark could not ask:
+contention is a property of how many customers want the same SKU, and on SQLite
+it was indistinguishable from the engine's own serialisation.
+
+> **SQLite is faster in absolute terms** — 452/s against 32/s on the hot row.
+> That is what an in-process engine with no loopback round-trip looks like, not a
+> verdict. Quoting it as a database comparison would repeat the original mistake
+> in the other direction.
+
+### The retry budget was calibrated against the wrong engine
+
+`reserve_optimistic` ships with `max_retries=8`. Sixteen workers on one row:
+
+| max_retries | granted / 640 | starved | retries spent |
+|---|---|---|---|
+| 4 | 195 | 69.5% | 177 |
+| **8** (shipped) | **301** | **53.0%** | 532 |
+| 16 | 422 | 34.1% | 1,404 |
+| 32 | 565 | 11.7% | 3,472 |
+| 64 | 623 | **2.7%** | 5,119 |
+
+**It never reaches zero.** Optimistic concurrency converts contention into wasted
+work; the budget decides how much waste you buy the tail with, not whether the
+tail exists. A hot row needs the pessimistic path or a different data model, and
+no retry number fixes it.
+
+The default of 8 was not chosen carelessly — it was chosen against a database
+where it could never be tested.
+
+**What still does not transfer:** client and server are one machine over
+loopback, fsync off, no connection pool. These are a floor, exactly as the load
+generator's numbers are, and changing the engine does not touch that.
+
 ## What is deliberately not here
 
-- **SQLite, not Postgres**, and no Postgres binary is installable in this
-  environment. This weakens exactly one claim — the optimistic-vs-pessimistic
-  contention benchmark measures retry cost, not row-level concurrency, because
-  both queue behind one global write lock. The report says so at the point of the
-  claim. The conditional-`UPDATE` shape transfers; the throughput number does not.
+- **The application still runs on SQLite; only the contention drill runs on
+  Postgres.** `checkout.py` and the HTTP surface were not ported, so the flash
+  sale, the sweeper and the ledger are still measured on the engine whose
+  limitation the Postgres pass just documented. Porting the whole application is
+  the honest next step and it is not done.
+- **No connection pool, loopback only, fsync off.** The Postgres numbers are a
+  floor for the same reasons the load generator's are.
 - **No tax jurisdiction model.** Rates are per-category. Nexus, destination vs
   origin sourcing and product taxability codes are the actual hard part and are
   entirely absent.

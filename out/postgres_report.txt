@@ -1,0 +1,118 @@
+==============================================================================
+SE-1 POSTGRES PASS
+==============================================================================
+PostgreSQL 17.2, loopback, fsync off.
+
+THE CAVEAT THIS PROJECT CARRIED FOR FOUR PASSES:
+
+  'SQLite, not Postgres, and no Postgres binary is installable in this
+   environment. The conditional-UPDATE shape transfers; the throughput
+   number does not.'
+
+  The first clause is false. The official Windows x64 binaries are a
+  297 MB zip that unpacks and runs initdb into a local directory -- no
+  installer, no service registration, no administrator rights. It was
+  written in the first pass and repeated three times without being
+  retested. THAT IS THE SAME FAILURE THIS PORTFOLIO KEEPS FINDING IN
+  OTHER PEOPLE'S NUMBERS: a caveat is a claim, and an unretested claim
+  does not become true by being repeated.
+
+==============================================================================
+A. THE SAME DRILL ON BOTH ENGINES
+==============================================================================
+  engine   mechanism  skus  granted  attempted  starved_share  retries  oversell   seconds  throughput
+  sqlite  optimistic     1      640        640          0.000       49         0     1.416     451.961
+postgres  optimistic     1      277        640          0.567      427         0     8.561      32.357
+  sqlite pessimistic     1      640        640          0.000        0         0     0.809     790.980
+postgres pessimistic     1      640        640          0.000        0         0     6.304     101.527
+  sqlite  optimistic     4      640        640          0.000       44         0     0.496    1291.454
+postgres  optimistic     4      588        640          0.081      847         0     5.637     104.320
+  sqlite pessimistic     4      640        640          0.000        0         0     1.037     617.399
+postgres pessimistic     4      640        640          0.000        0         0     6.077     105.322
+  sqlite  optimistic    16      640        640          0.000       43         0     1.430     447.659
+postgres  optimistic    16      640        640          0.000      196         0     4.995     128.135
+  sqlite pessimistic    16      640        640          0.000        0         0     0.855     748.839
+postgres pessimistic    16      640        640          0.000        0         0     4.762     134.392
+  sqlite  optimistic    64      640        640          0.000       27         0     0.503    1272.096
+postgres  optimistic    64      640        640          0.000      153         0     6.215     102.969
+  sqlite pessimistic    64      640        640          0.000        0         0     0.968     661.063
+postgres pessimistic    64      640        640          0.000        0         0     4.660     137.326
+
+  Stock is ample everywhere, so every `sold_out` is a request that
+  FAILED WITH STOCK ON THE SHELF -- the optimistic path exhausting its
+  retry budget. Nothing here is a real sellout.
+
+  Oversells across every row and both engines: 0. The mechanism is
+  correct on both, which is the part that did transfer.
+
+READ THE ONE-SKU OPTIMISTIC ROWS AGAINST EACH OTHER.
+
+    sqlite   :  640 of  640 granted,    49 retries
+    postgres :  277 of  640 granted,   427 retries
+
+  THE CAVEAT WAS UNDERSTATED. It said the throughput number does not
+  transfer. What does not transfer is the BEHAVIOUR: on Postgres the
+  optimistic mechanism starves 57% of requests that had stock
+  available, and on SQLite the identical code starves 0%.
+
+  The reason is not that SQLite is better. It is that SQLite SERIALISES
+  WRITERS, so a compare-and-set has nothing to lose a race to: the
+  version cannot move under a caller who holds the only write lock in
+  the database. The optimistic mechanism's characteristic failure is
+  INVISIBLE THERE BY CONSTRUCTION -- not smaller, invisible.
+
+  Which means the previous benchmark was not a weak measurement of
+  optimistic-vs-pessimistic concurrency. It was a measurement of
+  something else that had been labelled with that name.
+
+  Spreading the same workload over more rows fixes it:
+      1 sku ->  277/ 640 granted ( 56.7% starved),   427 retries
+      4 sku ->  588/ 640 granted (  8.1% starved),   847 retries
+     16 sku ->  640/ 640 granted (  0.0% starved),   196 retries
+     64 sku ->  640/ 640 granted (  0.0% starved),   153 retries
+
+  That is the data-model question the old benchmark could not ask.
+  Contention is a property of how many customers want the same SKU, and
+  on SQLite it was indistinguishable from the engine's own serialisation.
+
+  AND SQLITE IS FASTER IN ABSOLUTE TERMS -- 452/s against 32/s on the
+  hot row. That is not a defence of SQLite, it is what an in-process
+  engine with no loopback round-trip looks like. Quoting it as a
+  database comparison would repeat the original mistake in the other
+  direction.
+
+==============================================================================
+B. THE RETRY BUDGET -- A DEFAULT CALIBRATED AGAINST THE WRONG ENGINE
+==============================================================================
+`reserve_optimistic` defaults to max_retries=8. Sixteen workers on ONE
+row, ample stock:
+
+ max_retries  granted  attempted  starved  starved_share  retries   seconds
+           4      171        640      469          0.733      115     5.440
+           8      285        640      355          0.555      434     6.380
+          16      438        640      202          0.316     1644     7.836
+          32      559        640       81          0.127     3459     9.039
+          64      626        640       14          0.022     5203    10.285
+
+  At the shipped default of 8, 55% of requests are refused with
+  stock on the shelf. At 64 it is 2%, and the retry count has gone
+  from 434 to 5203 to buy that.
+
+  IT NEVER REACHES ZERO. Optimistic concurrency converts contention
+  into wasted work, and the budget decides how much waste you buy the
+  tail with -- it does not decide whether the tail exists. A hot row
+  needs the pessimistic path or a different data model, and no retry
+  number fixes it.
+
+  The default of 8 was not chosen carelessly. It was chosen against a
+  database where it was never tested, because SQLite cannot generate
+  the contention that tests it.
+
+==============================================================================
+WHAT STILL DOES NOT TRANSFER
+==============================================================================
+  Client and server are one machine over loopback. No network, no
+  serialisation across a wire, no connection pool, fsync off. These are
+  a floor, exactly as the load generator's numbers are, and the engine
+  change does not touch that.
+
