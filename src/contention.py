@@ -34,6 +34,13 @@ def sqlite_flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
     Uses `inventory.reserve_optimistic` / `reserve_pessimistic` unchanged: the
     point is to measure this project's actual code on a different engine, not a
     reimplementation that might differ in some way nobody noticed.
+
+    Timing starts when the BARRIER TRIPS, not when the threads are launched.
+    Connecting to Postgres costs ~10 ms and opening a SQLite file costs almost
+    nothing, so a timer started before the connects charges one engine for setup
+    the other does not do -- and the first version of this did exactly that,
+    reporting 71 redemptions/s for a single worker against 827/s for the same
+    code in a plain loop.
     """
     if os.path.exists(path):
         os.remove(path)
@@ -49,7 +56,9 @@ def sqlite_flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
     granted, sold_out, retries = [0], [0], [0]
     errors: list[str] = []
     lock = threading.Lock()
-    barrier = threading.Barrier(n_workers)
+    started = []
+    barrier = threading.Barrier(
+        n_workers, action=lambda: started.append(time.perf_counter()))
 
     def worker(w: int):
         c = DB.connect(path)
@@ -81,12 +90,17 @@ def sqlite_flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
             c.close()
 
     threads = [threading.Thread(target=worker, args=(w,)) for w in range(n_workers)]
-    t0 = time.perf_counter()
+    launched = time.perf_counter()
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    elapsed = time.perf_counter() - t0
+    done = time.perf_counter()
+    # measured from the barrier, so connection setup is not charged to either
+    # engine; `setup_seconds` is reported rather than hidden.
+    t0 = started[0] if started else launched
+    elapsed = done - t0
+    setup = t0 - launched
 
     c = DB.connect(path)
     rows = c.execute("SELECT sku, on_hand, reserved FROM stock ORDER BY sku").fetchall()
@@ -101,7 +115,7 @@ def sqlite_flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
 
 def sweep(sku_counts=(1, 4, 16, 64), n_workers: int = 32,
           attempts_each: int = 60, stock: int = 100_000,
-          sqlite_path: str = "out/contention.db") -> list[dict]:
+          sqlite_path: str = "out/contention.db", reps: int = 3) -> list[dict]:
     """Both engines, both mechanisms, across contention levels.
 
     Stock is deliberately ample. A drill that sells out measures the sold-out
@@ -109,19 +123,89 @@ def sweep(sku_counts=(1, 4, 16, 64), n_workers: int = 32,
     than how fast the engine went -- the first version of this did exactly that
     and read 7/s against 103/s purely because one arm had 40 units and the other
     had 640.
+
+    REPEATED, and the median is reported. A single repetition of this drill is
+    noisy enough to flip the sign of the engine comparison: consecutive runs gave
+    Postgres 917/s and then 563/s on the same one-row pessimistic cell, against
+    SQLite's 623/s and 618/s. Reporting one run would have made the headline a
+    coin toss, which is the failure this portfolio has already caught twice
+    elsewhere -- once in a convergence rate and once in a cluster-SE threshold.
     """
+    import statistics
+
     from src import pgstore as PG
     out = []
     have_pg = PG.available()
     for n in sku_counts:
         skus = {"SKU-%03d" % i: stock for i in range(n)}
         for mech in ("optimistic", "pessimistic"):
-            r = sqlite_flash_sale(mech, skus, n_workers, attempts_each,
-                                  sqlite_path)
-            out.append(r)
+            arms = {"sqlite": []}
             if have_pg:
-                PG.reset(skus)
-                p = PG.flash_sale(mech, skus, n_workers, attempts_each)
-                p["engine"] = "postgres"
-                out.append(p)
+                arms["postgres"] = []
+            for _ in range(reps):
+                arms["sqlite"].append(
+                    sqlite_flash_sale(mech, skus, n_workers, attempts_each,
+                                      sqlite_path))
+                if have_pg:
+                    PG.reset(skus)
+                    p = PG.flash_sale(mech, skus, n_workers, attempts_each)
+                    p["engine"] = "postgres"
+                    arms["postgres"].append(p)
+            for engine, runs in arms.items():
+                agg = dict(runs[0])
+                agg["engine"] = engine
+                agg["reps"] = reps
+                for key in ("granted", "sold_out", "retries", "oversell",
+                            "seconds", "throughput"):
+                    agg[key] = statistics.median(r[key] for r in runs)
+                agg["throughput_min"] = min(r["throughput"] for r in runs)
+                agg["throughput_max"] = max(r["throughput"] for r in runs)
+                out.append(agg)
+    return out
+
+
+def scaling_ratio(n_workers: int = 16, attempts_each: int = 40,
+                  stock: int = 100_000, reps: int = 9,
+                  sqlite_path: str = "out/scaling.db") -> dict:
+    """Does spreading the SAME workload across more rows buy anything?
+
+    PAIRED within a repetition: the one-row and sixteen-row cells for an engine
+    run back to back, so machine drift cancels instead of landing in the ratio.
+    Unpaired medians of this were not stable -- successive five-rep runs put the
+    Postgres ratio at 1.76x and then 1.34x, which is not a measurement, it is a
+    number that happened.
+
+    The pessimistic mechanism only, because it is the like-for-like arm: the
+    optimistic one starves on the hot row, and comparing a rate that granted 640
+    against one that granted 306 is comparing two different experiments.
+    """
+    import statistics
+
+    from src import pgstore as PG
+    one = {"SKU-000": stock}
+    many = {"SKU-%03d" % i: stock for i in range(16)}
+    have_pg = PG.available()
+    ratios: dict[str, list[float]] = {"sqlite": []}
+    if have_pg:
+        ratios["postgres"] = []
+    for _ in range(reps):
+        a = sqlite_flash_sale("pessimistic", one, n_workers, attempts_each,
+                              sqlite_path)
+        b = sqlite_flash_sale("pessimistic", many, n_workers, attempts_each,
+                              sqlite_path)
+        ratios["sqlite"].append(b["throughput"] / max(a["throughput"], 1e-9))
+        if have_pg:
+            PG.reset(one)
+            pa = PG.flash_sale("pessimistic", one, n_workers, attempts_each)
+            PG.reset(many)
+            pb = PG.flash_sale("pessimistic", many, n_workers, attempts_each)
+            ratios["postgres"].append(
+                pb["throughput"] / max(pa["throughput"], 1e-9))
+    out = {"reps": reps}
+    for engine, vals in ratios.items():
+        out[engine] = dict(median=statistics.median(vals),
+                           low=min(vals), high=max(vals))
+    if have_pg:
+        out["postgres_scaled_more"] = sum(
+            1 for x, y in zip(ratios["postgres"], ratios["sqlite"]) if x > y)
     return out

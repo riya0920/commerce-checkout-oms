@@ -173,6 +173,13 @@ def flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
     psycopg releases the GIL for it -- which is also why this is a fair
     comparison against the SQLite arm, where the GIL and the global write lock
     are precisely what is being measured.
+
+    Timing starts when the BARRIER TRIPS, not when the threads are launched.
+    Connecting to Postgres costs ~10 ms and opening a SQLite file costs almost
+    nothing, so a timer started before the connects charges one engine for setup
+    the other does not do -- and the first version of this did exactly that,
+    reporting 71 redemptions/s for a single worker against 827/s for the same
+    code in a plain loop.
     """
     reserve = (reserve_optimistic if mechanism == "optimistic"
                else reserve_pessimistic)
@@ -182,7 +189,9 @@ def flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
     retries = [0]
     errors: list[str] = []
     lock = threading.Lock()
-    barrier = threading.Barrier(n_workers)
+    started = []
+    barrier = threading.Barrier(
+        n_workers, action=lambda: started.append(time.perf_counter()))
 
     def worker(w: int):
         try:
@@ -207,12 +216,17 @@ def flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
                 errors.append("connect: %s" % e)
 
     threads = [threading.Thread(target=worker, args=(w,)) for w in range(n_workers)]
-    t0 = time.perf_counter()
+    launched = time.perf_counter()
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    elapsed = time.perf_counter() - t0
+    done = time.perf_counter()
+    # measured from the barrier, so connection setup is not charged to either
+    # engine; `setup_seconds` is reported rather than hidden.
+    t0 = started[0] if started else launched
+    elapsed = done - t0
+    setup = t0 - launched
 
     with psycopg.connect(DSN) as con:
         rows = con.execute(
@@ -225,7 +239,7 @@ def flash_sale(mechanism: str, skus: dict[str, int], n_workers: int,
                 granted=granted[0], sold_out=sold_out[0], retries=retries[0],
                 reserved_total=sum(r for _, _, r in rows),
                 reservations_held=held, oversell=oversell,
-                seconds=elapsed, throughput=granted[0] / max(elapsed, 1e-9),
+                seconds=elapsed, setup_seconds=setup, throughput=granted[0] / max(elapsed, 1e-9),
                 errors=errors[:5], n_errors=len(errors))
 
 

@@ -349,10 +349,41 @@ Spreading the same workload across more rows removes it entirely (56.7% → 8.1%
 contention is a property of how many customers want the same SKU, and on SQLite
 it was indistinguishable from the engine's own serialisation.
 
-> **SQLite is faster in absolute terms** — 452/s against 32/s on the hot row.
-> That is what an in-process engine with no loopback round-trip looks like, not a
-> verdict. Quoting it as a database comparison would repeat the original mistake
-> in the other direction.
+### Throughput: the shape, not the rate
+
+> **A correction to my own first run of this.** The initial harness started its
+> timer before the worker threads connected, so ~4.8 s of Postgres connection
+> setup was charged to the drill while SQLite's file-open cost nothing. It
+> reported **452/s against 32/s** and I put that in this README. Timing now
+> starts when the barrier trips, and `setup_seconds` is reported separately.
+
+Absolute rates on one machine are noisy enough that a single run flips the sign —
+consecutive runs gave Postgres 917/s and then 563/s on the same cell. So the claim
+is made on the **shape**, measured **paired**: the one-row and sixteen-row cells
+run back to back within each repetition, so machine drift cancels instead of
+landing in the ratio.
+
+Throughput gain from spreading the same workload from 1 row to 16, pessimistic
+mechanism, 9 paired repetitions:
+
+| engine | median | range |
+|---|---|---|
+| sqlite | ~0.8–1.1× | 0.35 – 1.42 |
+| **postgres** | **~1.2–1.5×** | 0.97 – 1.78 |
+
+**Postgres scaled more than SQLite in 8 of 9 paired repetitions**, and that count
+is the part that reproduces — the median ratio itself moved between two runs of
+the same nine-rep measurement.
+
+SQLite's range includes **0.35**: it sometimes goes *slower* with more rows, which
+is what "the number of distinct rows is irrelevant to this engine" looks like when
+you measure it — noise around 1.0. Its global write lock does not care how many
+rows there are. Postgres's row locks do.
+
+**That is SE-2's prediction, tested** — *"writers on different rows queue here and
+would proceed in parallel on Postgres."* **It holds in direction and not in
+magnitude.** "Proceed in parallel" overstates the size: at 16 workers the
+bottleneck is already partly the client, and no engine change moves that.
 
 ### The retry budget was calibrated against the wrong engine
 

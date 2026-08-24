@@ -21,22 +21,22 @@ THE CAVEAT THIS PROJECT CARRIED FOR FOUR PASSES:
 A. THE SAME DRILL ON BOTH ENGINES
 ==============================================================================
   engine   mechanism  skus  granted  attempted  starved_share  retries  oversell   seconds  throughput
-  sqlite  optimistic     1      640        640          0.000       49         0     1.416     451.961
-postgres  optimistic     1      277        640          0.567      427         0     8.561      32.357
-  sqlite pessimistic     1      640        640          0.000        0         0     0.809     790.980
-postgres pessimistic     1      640        640          0.000        0         0     6.304     101.527
-  sqlite  optimistic     4      640        640          0.000       44         0     0.496    1291.454
-postgres  optimistic     4      588        640          0.081      847         0     5.637     104.320
-  sqlite pessimistic     4      640        640          0.000        0         0     1.037     617.399
-postgres pessimistic     4      640        640          0.000        0         0     6.077     105.322
-  sqlite  optimistic    16      640        640          0.000       43         0     1.430     447.659
-postgres  optimistic    16      640        640          0.000      196         0     4.995     128.135
-  sqlite pessimistic    16      640        640          0.000        0         0     0.855     748.839
-postgres pessimistic    16      640        640          0.000        0         0     4.762     134.392
-  sqlite  optimistic    64      640        640          0.000       27         0     0.503    1272.096
-postgres  optimistic    64      640        640          0.000      153         0     6.215     102.969
-  sqlite pessimistic    64      640        640          0.000        0         0     0.968     661.063
-postgres pessimistic    64      640        640          0.000        0         0     4.660     137.326
+  sqlite  optimistic     1      640        640          0.000       40         0     0.350    1827.274
+postgres  optimistic     1      272        640          0.575      417         0     2.232     118.269
+  sqlite pessimistic     1      640        640          0.000        0         0     0.751     852.417
+postgres pessimistic     1      640        640          0.000        0         0     0.812     787.851
+  sqlite  optimistic     4      640        640          0.000       36         0     0.355    1802.917
+postgres  optimistic     4      591        640          0.077      880         0     1.605     369.584
+  sqlite pessimistic     4      640        640          0.000        0         0     0.878     728.992
+postgres pessimistic     4      640        640          0.000        0         0     0.601    1064.274
+  sqlite  optimistic    16      640        640          0.000       39         0     0.392    1634.479
+postgres  optimistic    16      640        640          0.000      165         0     0.834     767.071
+  sqlite pessimistic    16      640        640          0.000        0         0     0.659     971.564
+postgres pessimistic    16      640        640          0.000        0         0     0.554    1154.312
+  sqlite  optimistic    64      640        640          0.000       25         0     0.325    1970.991
+postgres  optimistic    64      640        640          0.000       97         0     0.718     891.547
+  sqlite pessimistic    64      640        640          0.000        0         0     0.679     942.809
+postgres pessimistic    64      640        640          0.000        0         0     0.590    1085.241
 
   Stock is ample everywhere, so every `sold_out` is a request that
   FAILED WITH STOCK ON THE SHELF -- the optimistic path exhausting its
@@ -47,8 +47,8 @@ postgres pessimistic    64      640        640          0.000        0         0
 
 READ THE ONE-SKU OPTIMISTIC ROWS AGAINST EACH OTHER.
 
-    sqlite   :  640 of  640 granted,    49 retries
-    postgres :  277 of  640 granted,   427 retries
+    sqlite   :  640 of  640 granted,    40 retries
+    postgres :  272 of  640 granted,   417 retries
 
   THE CAVEAT WAS UNDERSTATED. It said the throughput number does not
   transfer. What does not transfer is the BEHAVIOUR: on Postgres the
@@ -66,20 +66,61 @@ READ THE ONE-SKU OPTIMISTIC ROWS AGAINST EACH OTHER.
   something else that had been labelled with that name.
 
   Spreading the same workload over more rows fixes it:
-      1 sku ->  277/ 640 granted ( 56.7% starved),   427 retries
-      4 sku ->  588/ 640 granted (  8.1% starved),   847 retries
-     16 sku ->  640/ 640 granted (  0.0% starved),   196 retries
-     64 sku ->  640/ 640 granted (  0.0% starved),   153 retries
+      1 sku ->  272/ 640 granted ( 57.5% starved),   417 retries
+      4 sku ->  591/ 640 granted (  7.7% starved),   880 retries
+     16 sku ->  640/ 640 granted (  0.0% starved),   165 retries
+     64 sku ->  640/ 640 granted (  0.0% starved),    97 retries
 
   That is the data-model question the old benchmark could not ask.
   Contention is a property of how many customers want the same SKU, and
   on SQLite it was indistinguishable from the engine's own serialisation.
 
-  AND SQLITE IS FASTER IN ABSOLUTE TERMS -- 452/s against 32/s on the
-  hot row. That is not a defence of SQLite, it is what an in-process
-  engine with no loopback round-trip looks like. Quoting it as a
-  database comparison would repeat the original mistake in the other
-  direction.
+ON THROUGHPUT, COMPARE THE PESSIMISTIC ROWS, NOT THE OPTIMISTIC ONES.
+
+  Comparing rates on the optimistic hot row would be comparing a run
+  that granted 640 requests against one that granted 272. The pessimistic
+  rows are the like-for-like pair -- both grant everything:
+
+    1 sku : sqlite    852/s   postgres    788/s
+   16 sku : sqlite    972/s   postgres   1154/s
+
+  Absolute rates on one machine are noisy enough that a single run
+  flips the sign: consecutive runs gave Postgres 917/s then 563/s on
+  the same cell. So the claim is made on the SHAPE, measured PAIRED --
+  the one-row and sixteen-row cells run back to back within each
+  repetition, so machine drift cancels instead of landing in the ratio.
+
+  Throughput gain from spreading the same workload 1 row -> 16 rows,
+  9 paired repetitions, pessimistic mechanism:
+
+    sqlite   : median 0.86x   (range 0.37 - 1.41)
+    postgres : median 1.33x   (range 1.17 - 1.54)
+
+  Postgres scaled more than SQLite in 7 of 9 paired repetitions.
+
+  SQLite's range includes 0.37 -- it sometimes goes SLOWER with more
+  rows, which is what 'the number of distinct rows is irrelevant to
+  this engine' looks like when you measure it: noise around 1.0. Its
+  global write lock does not care how many rows there are. Postgres's
+  row locks do.
+
+  THAT IS SE-2'S PREDICTION, TESTED: 'writers on different rows queue
+  here and would proceed in parallel on Postgres.'
+
+  IT HOLDS IN DIRECTION AND NOT IN MAGNITUDE. The paired count -- 7 of
+  9 -- is the part that reproduces; the median ratio itself moved from
+  1.50x to 1.33x between two runs of this same nine-rep measurement.
+  So: Postgres does benefit from spreading writers across rows and
+  SQLite does not, which is the structural claim. 'Proceed in parallel'
+  overstates the size -- at 16 workers the bottleneck is already partly
+  the client, and no engine change moves that.
+
+  A CORRECTION TO THIS PROJECT'S OWN FIRST POSTGRES RUN. The initial
+  version of this harness started its timer before the worker threads
+  connected, so ~4.8 s of Postgres connection setup was charged to the
+  drill while SQLite's file-open cost nothing. It reported 452/s against
+  32/s and I put that in the README. Timing now starts when the barrier
+  trips and `setup_seconds` is reported separately.
 
 ==============================================================================
 B. THE RETRY BUDGET -- A DEFAULT CALIBRATED AGAINST THE WRONG ENGINE
@@ -88,15 +129,15 @@ B. THE RETRY BUDGET -- A DEFAULT CALIBRATED AGAINST THE WRONG ENGINE
 row, ample stock:
 
  max_retries  granted  attempted  starved  starved_share  retries   seconds
-           4      171        640      469          0.733      115     5.440
-           8      285        640      355          0.555      434     6.380
-          16      438        640      202          0.316     1644     7.836
-          32      559        640       81          0.127     3459     9.039
-          64      626        640       14          0.022     5203    10.285
+           4      173        640      467          0.730      111     1.532
+           8      281        640      359          0.561      480     2.585
+          16      403        640      237          0.370     1074     3.014
+          32      539        640      101          0.158     3084     4.476
+          64      616        640       24          0.037     5921     5.966
 
-  At the shipped default of 8, 55% of requests are refused with
-  stock on the shelf. At 64 it is 2%, and the retry count has gone
-  from 434 to 5203 to buy that.
+  At the shipped default of 8, 56% of requests are refused with
+  stock on the shelf. At 64 it is 4%, and the retry count has gone
+  from 480 to 5921 to buy that.
 
   IT NEVER REACHES ZERO. Optimistic concurrency converts contention
   into wasted work, and the budget decides how much waste you buy the
