@@ -1,0 +1,6 @@
+fastapi
+hypothesis
+numpy
+pandas
+pydantic
+pytest
