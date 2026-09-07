@@ -1,6 +1,8 @@
 fastapi
+httpx
 hypothesis
 numpy
 pandas
+psycopg[binary]
 pydantic
 pytest
